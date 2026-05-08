@@ -34,13 +34,26 @@ _DEFAULT_TRACTION = 1.0
 
 
 def _add_sliders(client: int) -> dict:
-    """Create the debug sliders and return their PyBullet ids."""
+    """Create the debug sliders and return their PyBullet ids.
+
+    The env disables the PyBullet side panel for headless-style rendering;
+    sliders live inside that panel, so we have to re-enable it here. The
+    RGB/depth/segmentation preview panels are kept off because they're
+    expensive and we don't need them.
+    """
+    p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1, physicsClientId=client)
+    p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0,
+                                physicsClientId=client)
+    p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0,
+                                physicsClientId=client)
+    p.configureDebugVisualizer(p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, 0,
+                                physicsClientId=client)
     return {
         "torque": p.addUserDebugParameter(
             "Torque (N)", _TORQUE_MIN, _TORQUE_MAX,
             float(CAR_CONFIG["max_force"]), physicsClientId=client),
         "traction": p.addUserDebugParameter(
-            "Traction (μ)", _TRACTION_MIN, _TRACTION_MAX,
+            "Traction (mu)", _TRACTION_MIN, _TRACTION_MAX,
             _DEFAULT_TRACTION, physicsClientId=client),
     }
 

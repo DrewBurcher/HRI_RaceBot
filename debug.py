@@ -18,11 +18,31 @@ import argparse
 import time
 
 import numpy as np
+import pybullet as p
 
 from agents.human_agent import HumanKeyboardAgent
 from agents.random_agent import RandomAgent
 from agents.rl_agent import RLAgent
+from config import CAR_CONFIG
 from env import TwoCarRaceEnv
+
+
+# Slider ranges. Defaults match CAR_CONFIG so behavior is unchanged on launch.
+_TORQUE_MIN, _TORQUE_MAX = 1.0, 100.0
+_TRACTION_MIN, _TRACTION_MAX = 0.1, 3.0
+_DEFAULT_TRACTION = 1.0
+
+
+def _add_sliders(client: int) -> dict:
+    """Create the debug sliders and return their PyBullet ids."""
+    return {
+        "torque": p.addUserDebugParameter(
+            "Torque (N)", _TORQUE_MIN, _TORQUE_MAX,
+            float(CAR_CONFIG["max_force"]), physicsClientId=client),
+        "traction": p.addUserDebugParameter(
+            "Traction (μ)", _TRACTION_MIN, _TRACTION_MAX,
+            _DEFAULT_TRACTION, physicsClientId=client),
+    }
 
 
 def _build_opponent(kind: str, model_path: str | None, algo: str):
@@ -56,15 +76,33 @@ def main():
     opp = (None if args.both
            else _build_opponent(args.opponent, args.opp_model, args.algo))
 
+    sliders = _add_sliders(env.client)
+    last_traction = -1.0      # force a set_traction on the first frame
+
     print("=" * 60)
     print("  HRI_RaceBot — manual debugging mode")
     print("  W/Up: throttle  S/Down: reverse  A/Left, D/Right: steer")
     print("  SPACE: brake    Ctrl+C: quit")
+    print("  Sliders (PyBullet sidebar): Torque, Traction — affect both cars")
     print("=" * 60)
 
     try:
         race = 0
         while True:
+            # Read sliders, push to both cars. Torque is cheap to set every
+            # step (just an instance attribute); traction calls changeDynamics
+            # so only update on actual change.
+            torque_val = float(p.readUserDebugParameter(
+                sliders["torque"], physicsClientId=env.client))
+            traction_val = float(p.readUserDebugParameter(
+                sliders["traction"], physicsClientId=env.client))
+            for car in env.cars.values():
+                car.set_max_force(torque_val)
+            if abs(traction_val - last_traction) > 1e-3:
+                for car in env.cars.values():
+                    car.set_traction(traction_val)
+                last_traction = traction_val
+
             actions = {}
             actions["car_0"] = human0.act(obs["car_0"])
             if args.both:
@@ -80,6 +118,8 @@ def main():
                 human0.reset()
                 if human1 is not None:
                     human1.reset()
+                # Re-apply current slider state to the freshly spawned cars
+                last_traction = -1.0
             time.sleep(1.0 / 30.0)
     except KeyboardInterrupt:
         print("\n[debug] stopped by user")

@@ -48,6 +48,12 @@ class RaceCar:
 
         self.steer_joints, self.drive_joints = self._discover_joints()
 
+        # Tunable physics — exposed as instance state so debug-mode sliders
+        # (or a curriculum callback) can change them at runtime without
+        # touching CAR_CONFIG.
+        self.max_force = float(self._cfg["max_force"])
+        self.target_velocity = float(self._cfg["target_velocity"])
+
         if color is not None:
             self._tint(color)
 
@@ -75,7 +81,7 @@ class RaceCar:
             except Exception:
                 pass
 
-    # ── Control ───────────────────────────────────────────────────────────
+    # ── Control ─────────────────────────────────────────────────────────
     def apply_action(self, steer: float, throttle: float) -> None:
         """Steer and throttle in [-1, 1].
 
@@ -85,8 +91,8 @@ class RaceCar:
         steer = float(np.clip(steer, -1.0, 1.0))
         throttle = float(np.clip(throttle, -1.0, 1.0))
         s_target = steer * self._cfg["max_steer"]
-        v_target = throttle * self._cfg["target_velocity"]
-        force = self._cfg["max_force"]
+        v_target = throttle * self.target_velocity
+        force = self.max_force
 
         for j in self.steer_joints:
             p.setJointMotorControl2(
@@ -101,6 +107,21 @@ class RaceCar:
                 physicsClientId=self.client,
             )
 
+    def set_max_force(self, force: float) -> None:
+        """Update the drive-wheel max force (Newtons). Picked up next step."""
+        self.max_force = float(force)
+
+    def set_traction(self, lateral_friction: float) -> None:
+        """Set lateral friction on every wheel link (drive + steer).
+
+        PyBullet uses link index = joint index for a non-fixed joint, so the
+        joints discovered as steer/drive double as the wheel links.
+        """
+        for j in self.drive_joints + self.steer_joints:
+            p.changeDynamics(self.body, j,
+                              lateralFriction=float(lateral_friction),
+                              physicsClientId=self.client)
+
     def reset(self, position: Sequence[float], orientation: Sequence[float]) -> None:
         p.resetBasePositionAndOrientation(
             self.body, list(position), list(orientation),
@@ -111,7 +132,7 @@ class RaceCar:
             p.resetJointState(self.body, j, 0.0, 0.0,
                               physicsClientId=self.client)
 
-    # ── State ─────────────────────────────────────────────────────────────────────
+    # ── State ──────────────────────────────────────────────────────────────────────
     def get_state(self) -> dict:
         pos, orn = p.getBasePositionAndOrientation(self.body,
                                                     physicsClientId=self.client)

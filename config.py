@@ -30,9 +30,10 @@ TRACK_CONFIG = {
 # ── Car ─────────────────────────────────────────────────────────────────────────
 CAR_CONFIG = {
     "urdf": "racecar/racecar.urdf",   # ships with pybullet_data
-    "max_force": 25.0,                # motor force (N) per drive wheel
+    "max_force": 50.0,                # motor force (N) per drive wheel
     "max_steer": 0.6,                 # steering range (rad)
-    "target_velocity": 30.0,          # rad/s target on drive wheels
+    "target_velocity": 100.0,         # rad/s target on drive wheels at throttle=1
+                                       # (≈ 8 m/s with the default racecar wheels)
     "spawn_z": 0.05,
 }
 
@@ -58,7 +59,7 @@ RACE_CONFIG = {
     "speed_reward": 0.05,         # encourage going fast
 }
 
-# ── RL hyperparameters ───────────────────────────────────────────────────
+# ── RL hyperparameters ─────────────────────────────────────────────────────
 PPO_CONFIG = {
     "learning_rate": 3e-4,
     "n_steps": 2048,

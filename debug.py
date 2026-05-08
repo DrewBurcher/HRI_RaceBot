@@ -28,7 +28,8 @@ from env import TwoCarRaceEnv
 
 
 # Slider ranges. Defaults match CAR_CONFIG so behavior is unchanged on launch.
-_TORQUE_MIN, _TORQUE_MAX = 1.0, 100.0
+_TORQUE_MIN, _TORQUE_MAX = 1.0, 200.0
+_SPEED_MIN, _SPEED_MAX = 10.0, 300.0
 _TRACTION_MIN, _TRACTION_MAX = 0.1, 3.0
 _DEFAULT_TRACTION = 1.0
 
@@ -40,6 +41,10 @@ def _add_sliders(client: int) -> dict:
     sliders live inside that panel, so we have to re-enable it here. The
     RGB/depth/segmentation preview panels are kept off because they're
     expensive and we don't need them.
+
+    Note: torque is the motor *force*, top speed is the velocity *target*.
+    Cars are velocity-controlled, so cranking torque alone won't make them
+    faster once they hit the speed cap — adjust both.
     """
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1, physicsClientId=client)
     p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0,
@@ -52,6 +57,9 @@ def _add_sliders(client: int) -> dict:
         "torque": p.addUserDebugParameter(
             "Torque (N)", _TORQUE_MIN, _TORQUE_MAX,
             float(CAR_CONFIG["max_force"]), physicsClientId=client),
+        "top_speed": p.addUserDebugParameter(
+            "Top Speed (rad/s)", _SPEED_MIN, _SPEED_MAX,
+            float(CAR_CONFIG["target_velocity"]), physicsClientId=client),
         "traction": p.addUserDebugParameter(
             "Traction (mu)", _TRACTION_MIN, _TRACTION_MAX,
             _DEFAULT_TRACTION, physicsClientId=client),
@@ -96,21 +104,24 @@ def main():
     print("  HRI_RaceBot — manual debugging mode")
     print("  W/Up: throttle  S/Down: reverse  A/Left, D/Right: steer")
     print("  SPACE: brake    Ctrl+C: quit")
-    print("  Sliders (PyBullet sidebar): Torque, Traction — affect both cars")
+    print("  Sliders (PyBullet sidebar): Torque, Top Speed, Traction")
     print("=" * 60)
 
     try:
         race = 0
         while True:
-            # Read sliders, push to both cars. Torque is cheap to set every
-            # step (just an instance attribute); traction calls changeDynamics
-            # so only update on actual change.
+            # Read sliders, push to both cars. Torque + top-speed are cheap
+            # to set every step (just instance attrs); traction calls
+            # changeDynamics so only update on actual change.
             torque_val = float(p.readUserDebugParameter(
                 sliders["torque"], physicsClientId=env.client))
+            top_speed_val = float(p.readUserDebugParameter(
+                sliders["top_speed"], physicsClientId=env.client))
             traction_val = float(p.readUserDebugParameter(
                 sliders["traction"], physicsClientId=env.client))
             for car in env.cars.values():
                 car.set_max_force(torque_val)
+                car.set_target_velocity(top_speed_val)
             if abs(traction_val - last_traction) > 1e-3:
                 for car in env.cars.values():
                     car.set_traction(traction_val)

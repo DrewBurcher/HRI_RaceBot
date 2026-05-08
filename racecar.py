@@ -111,6 +111,14 @@ class RaceCar:
         """Update the drive-wheel max force (Newtons). Picked up next step."""
         self.max_force = float(force)
 
+    def set_target_velocity(self, velocity: float) -> None:
+        """Update drive-wheel target angular velocity (rad/s) at full throttle.
+
+        Top road speed ≈ velocity × wheel_radius (the default racecar URDF
+        has ~0.08 m wheels, so 100 rad/s ≈ 8 m/s).
+        """
+        self.target_velocity = float(velocity)
+
     def set_traction(self, lateral_friction: float) -> None:
         """Set lateral friction on every wheel link (drive + steer).
 
@@ -132,7 +140,7 @@ class RaceCar:
             p.resetJointState(self.body, j, 0.0, 0.0,
                               physicsClientId=self.client)
 
-    # ── State ──────────────────────────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────────────────────────────
     def get_state(self) -> dict:
         pos, orn = p.getBasePositionAndOrientation(self.body,
                                                     physicsClientId=self.client)

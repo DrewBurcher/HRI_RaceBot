@@ -1,16 +1,21 @@
 """
 Procedural racetrack builder.
 
-Current shape: an oval with a long straight section that's used as the
-start/finish line. Built from PyBullet primitives (no external assets) so
-it runs anywhere the default `pybullet_data` is available.
+Current shape: a stadium oval. Two parallel straights run along the x axis,
+joined by two semicircles on the left (-x) and right (+x) ends. The drivable
+area is the ring between an inner wall (radius `curve_radius - track_width/2`)
+and an outer wall (radius `curve_radius + track_width/2`).
 
-The straight runs along +x; the two semicircles bulge in +y / -y. The +y curve
-is traversed first when driving in the canonical direction (+x along the
-straight).
+Centerline traversal order (counter-clockwise looking down the +z axis):
+    1. Top straight    : (-sl/2, +r) -> (+sl/2, +r), tangent +x
+    2. Right semicircle: around (+sl/2, 0), top -> bottom
+    3. Bottom straight : (+sl/2, -r) -> (-sl/2, -r), tangent -x
+    4. Left semicircle : around (-sl/2, 0), bottom -> top
 
-Designed to be subclassed for additional track shapes later (just override
-`_build_geometry` and `centerline`).
+Cars start on the top straight, side-by-side, facing +x.
+
+Designed to be subclassed for additional track shapes later (override
+`_build_geometry`, `centerline_progress`, `_point_at_arclength`, `spawn_pose`).
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ class OvalTrack:
         self.checkpoints: List[Checkpoint] = self._build_checkpoints(
             self.cfg["checkpoint_count"])
 
-    # ── Public API ─────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────
     def build(self) -> None:
         """Load the ground plane and walls into the active physics client."""
         self._load_plane()
@@ -70,21 +75,27 @@ class OvalTrack:
 
     def spawn_pose(self, lane: int, jitter: float = 0.0
                    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
-        """Pose for a car at the start.
+        """Pose for a car at the start of the top straight.
 
-        `lane` is 0 for the inside lane and 1 for the outside lane. The
-        starting straight runs from -straight_length/2 to +straight_length/2,
-        so the start line itself is at x = -straight_length/2 + jitter.
+        Both cars sit on the top straight (y ≈ +curve_radius), side-by-side,
+        facing +x. `lane` is 0 for the inside lane (smaller |y|, closer to the
+        inner wall) and 1 for the outside lane (larger |y|, closer to the
+        outer wall). Lane assignment is alternated between races by env.py so
+        neither car gets a permanent advantage.
         """
         from config import CAR_CONFIG
 
         lane_offset = self.cfg["lane_offset"]
-        # inside lane sits closer to the center axis; outside sits further out
-        y = -lane_offset if lane == 0 else +lane_offset
+        # Top straight centerline is at y = +curve_radius. The inside lane
+        # sits between the centerline and the inner wall (smaller y), the
+        # outside lane sits between the centerline and the outer wall.
+        if lane == 0:
+            y = self.curve_radius - lane_offset   # inside (closer to origin)
+        else:
+            y = self.curve_radius + lane_offset   # outside (further from origin)
         x = -self.straight_length / 2.0 + jitter
         z = CAR_CONFIG["spawn_z"]
-        # cars face +x at the start
-        yaw = 0.0
+        yaw = 0.0  # face +x along the top straight
         quat = p.getQuaternionFromEuler([0.0, 0.0, yaw])
         return (x, y, z), quat
 
@@ -102,52 +113,39 @@ class OvalTrack:
     def centerline_progress(self, x: float, y: float) -> float:
         """Return cumulative arc-length progress around the oval [0, perimeter).
 
-        Used to compute lap progress and detect lap completion. Walks the four
-        track segments in order:
-            1. front straight  (start → +x end of straight, y ≈ 0)
-            2. +y semicircle    (around (+sl/2, 0))
-            3. back straight   (returning along -x)
-            4. -y semicircle    (around (-sl/2, 0))
+        Segments (CCW, starting at the start line):
+            1. Top straight    : (-sl/2, +r) → (+sl/2, +r)
+            2. Right semicircle: top → bottom around (+sl/2, 0)
+            3. Bottom straight : (+sl/2, -r) → (-sl/2, -r)
+            4. Left semicircle : bottom → top around (-sl/2, 0)
         """
         sl = self.straight_length
         r = self.curve_radius
-        seg1 = sl                       # front straight
+        seg1 = sl                       # top straight
         seg2 = math.pi * r              # right semicircle
-        seg3 = sl                       # back straight
-        seg4 = math.pi * r              # left semicircle
-        perim = seg1 + seg2 + seg3 + seg4
+        seg3 = sl                       # bottom straight
 
-        # Decide which segment (x, y) lies in based on coarse position.
-        if -sl / 2.0 <= x <= sl / 2.0 and y >= -1e-3 and abs(y) < r:
-            # near the front straight (positive y side of center)
-            if y < r * 0.5:  # treat "on straight" liberally
-                return (x + sl / 2.0) % perim
         if x > sl / 2.0:
-            # right semicircle around (sl/2, 0)
-            dx = x - sl / 2.0
-            dy = y
-            ang = math.atan2(dy, dx)        # 0 along +x, pi/2 along +y
-            # Going counter-clockwise on this side means decreasing angle from
-            # +pi/2 (entry) through 0 to -pi/2 (exit). Convert to arc length.
+            # Right semicircle, around (+sl/2, 0). Angle decreases from +π/2
+            # (entry at top) to -π/2 (exit at bottom).
+            ang = math.atan2(y, x - sl / 2.0)
             arc = (math.pi / 2.0 - ang) * r
             arc = max(0.0, min(seg2, arc))
             return seg1 + arc
-        if -sl / 2.0 <= x <= sl / 2.0 and y < 0:
-            # back straight, traversed in -x direction
-            return seg1 + seg2 + (sl / 2.0 - x)
         if x < -sl / 2.0:
-            # left semicircle around (-sl/2, 0)
-            dx = x + sl / 2.0
-            dy = y
-            ang = math.atan2(dy, dx)        # pi at +x in this frame
-            # Entry from below (-pi/2) to top (+pi/2); arc length grows
-            arc = (ang + math.pi / 2.0) * r
-            # Note: for the lower-left quadrant, atan2 returns negative, so we
-            # clamp to keep the value monotonic.
-            arc = max(0.0, min(seg4, arc))
+            # Left semicircle, around (-sl/2, 0). Entry at bottom (atan2 ≈ -π/2),
+            # mid at left (atan2 ≈ ±π), exit at top (atan2 ≈ +π/2). Unwrap so
+            # the angle decreases monotonically from -π/2 to -3π/2.
+            ang = math.atan2(y, x + sl / 2.0)
+            if ang > 0:
+                ang -= 2.0 * math.pi      # bring [π/2, π] into [-3π/2, -π]
+            arc = (-math.pi / 2.0 - ang) * r
+            arc = max(0.0, min(math.pi * r, arc))
             return seg1 + seg2 + seg3 + arc
-        # Fallback — shouldn't normally hit
-        return 0.0
+        # On a straight (or near it). Distinguish by sign of y.
+        if y >= 0:
+            return max(0.0, min(seg1, x + sl / 2.0))
+        return seg1 + seg2 + max(0.0, min(seg3, sl / 2.0 - x))
 
     def perimeter(self) -> float:
         return 2.0 * self.straight_length + 2.0 * math.pi * self.curve_radius
@@ -163,7 +161,7 @@ class OvalTrack:
         d = math.hypot(x - cx, y)
         return d < r_in or d > r_out
 
-    # ── Internals ───────────────────────────────────────────────────────
+    # ── Internals ─────────────────────────────────────────────────────
     def _load_plane(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         plane = p.loadURDF("plane.urdf", physicsClientId=self.client)
@@ -234,26 +232,30 @@ class OvalTrack:
 
     def _point_at_arclength(self, s: float
                             ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        """Inverse of centerline_progress: arc-length → (xy, tangent)."""
+        """Inverse of centerline_progress: arc-length → ((x, y), tangent)."""
         sl = self.straight_length
         r = self.curve_radius
         seg1 = sl
         seg2 = math.pi * r
         seg3 = sl
-        if s < seg1:                          # front straight (y ≈ 0, +x)
-            return (-sl / 2.0 + s, 0.0), (1.0, 0.0)
+        # 1. Top straight (y = +r), tangent +x
+        if s < seg1:
+            return (-sl / 2.0 + s, r), (1.0, 0.0)
         s -= seg1
-        if s < seg2:                          # +x semicircle
-            ang = math.pi / 2.0 - s / r       # decreasing from +pi/2
+        # 2. Right semicircle around (+sl/2, 0)
+        if s < seg2:
+            ang = math.pi / 2.0 - s / r       # +π/2 → -π/2
             x = sl / 2.0 + r * math.cos(ang)
             y = r * math.sin(ang)
-            tan_ang = ang - math.pi / 2.0     # tangent points around the curve
+            tan_ang = ang - math.pi / 2.0     # tangent rotates with the curve
             return (x, y), (math.cos(tan_ang), math.sin(tan_ang))
         s -= seg2
-        if s < seg3:                          # back straight (-x, y < 0)
-            return (sl / 2.0 - s, -0.0), (-1.0, 0.0)
-        s -= seg3                             # -x semicircle
-        ang = -math.pi / 2.0 + s / r
+        # 3. Bottom straight (y = -r), tangent -x
+        if s < seg3:
+            return (sl / 2.0 - s, -r), (-1.0, 0.0)
+        s -= seg3
+        # 4. Left semicircle around (-sl/2, 0): -π/2 → -3π/2
+        ang = -math.pi / 2.0 - s / r
         x = -sl / 2.0 + r * math.cos(ang)
         y = r * math.sin(ang)
         tan_ang = ang - math.pi / 2.0

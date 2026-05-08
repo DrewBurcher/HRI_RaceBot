@@ -87,7 +87,7 @@ class TwoCarRaceEnv(gym.Env):
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
                                              shape=(obs_dim,), dtype=np.float32)
 
-    # ── Reset / connect ─────────────────────────────────────────────────
+    # ── Reset / connect ──────────────────────────────────────────────────
     def _connect(self) -> None:
         if self.client is not None:
             try:
@@ -251,11 +251,16 @@ class TwoCarRaceEnv(gym.Env):
         ]).astype(np.float32)
 
     def _signed_lateral(self, x: float, y: float) -> float:
-        """Approx signed distance to the centerline (positive = outside)."""
+        """Signed distance from the centerline (positive = outside the oval).
+
+        On the straights the centerline runs along y = ±curve_radius; on the
+        curves it lies at radius `curve_radius` around the appropriate end
+        center.
+        """
         sl = self.track.straight_length
         r = self.track.curve_radius
         if -sl / 2.0 <= x <= sl / 2.0:
-            return float(abs(y) - 0.0)   # straights run along y=0
+            return float(abs(y) - r)
         cx = sl / 2.0 if x > 0 else -sl / 2.0
         d = float(np.hypot(x - cx, y))
         return d - r

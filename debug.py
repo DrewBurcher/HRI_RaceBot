@@ -28,8 +28,7 @@ from env import TwoCarRaceEnv
 
 
 # Slider ranges. Defaults match CAR_CONFIG so behavior is unchanged on launch.
-_TORQUE_MIN, _TORQUE_MAX = 1.0, 200.0
-_SPEED_MIN, _SPEED_MAX = 10.0, 300.0
+_TORQUE_MIN, _TORQUE_MAX = 0.1, 50.0
 _TRACTION_MIN, _TRACTION_MAX = 0.1, 3.0
 _DEFAULT_TRACTION = 1.0
 
@@ -42,9 +41,9 @@ def _add_sliders(client: int) -> dict:
     RGB/depth/segmentation preview panels are kept off because they're
     expensive and we don't need them.
 
-    Note: torque is the motor *force*, top speed is the velocity *target*.
-    Cars are velocity-controlled, so cranking torque alone won't make them
-    faster once they hit the speed cap — adjust both.
+    Drive wheels run under TORQUE_CONTROL — Max Torque sets the N·m applied
+    per wheel at full throttle. Top speed emerges from friction/slip, not
+    from a velocity cap.
     """
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1, physicsClientId=client)
     p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0,
@@ -55,11 +54,8 @@ def _add_sliders(client: int) -> dict:
                                 physicsClientId=client)
     return {
         "torque": p.addUserDebugParameter(
-            "Torque (N)", _TORQUE_MIN, _TORQUE_MAX,
-            float(CAR_CONFIG["max_force"]), physicsClientId=client),
-        "top_speed": p.addUserDebugParameter(
-            "Top Speed (rad/s)", _SPEED_MIN, _SPEED_MAX,
-            float(CAR_CONFIG["target_velocity"]), physicsClientId=client),
+            "Max Torque (N.m)", _TORQUE_MIN, _TORQUE_MAX,
+            float(CAR_CONFIG["max_torque"]), physicsClientId=client),
         "traction": p.addUserDebugParameter(
             "Traction (mu)", _TRACTION_MIN, _TRACTION_MAX,
             _DEFAULT_TRACTION, physicsClientId=client),
@@ -104,24 +100,21 @@ def main():
     print("  HRI_RaceBot — manual debugging mode")
     print("  W/Up: throttle  S/Down: reverse  A/Left, D/Right: steer")
     print("  SPACE: brake    Ctrl+C: quit")
-    print("  Sliders (PyBullet sidebar): Torque, Top Speed, Traction")
+    print("  Sliders (PyBullet sidebar): Max Torque, Traction")
     print("=" * 60)
 
     try:
         race = 0
         while True:
-            # Read sliders, push to both cars. Torque + top-speed are cheap
-            # to set every step (just instance attrs); traction calls
+            # Read sliders, push to both cars. Torque is cheap to set every
+            # step (just an instance attribute); traction calls
             # changeDynamics so only update on actual change.
             torque_val = float(p.readUserDebugParameter(
                 sliders["torque"], physicsClientId=env.client))
-            top_speed_val = float(p.readUserDebugParameter(
-                sliders["top_speed"], physicsClientId=env.client))
             traction_val = float(p.readUserDebugParameter(
                 sliders["traction"], physicsClientId=env.client))
             for car in env.cars.values():
-                car.set_max_force(torque_val)
-                car.set_target_velocity(top_speed_val)
+                car.set_max_torque(torque_val)
             if abs(traction_val - last_traction) > 1e-3:
                 for car in env.cars.values():
                     car.set_traction(traction_val)

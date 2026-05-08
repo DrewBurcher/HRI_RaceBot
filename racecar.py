@@ -51,11 +51,24 @@ class RaceCar:
         # Tunable physics — exposed as instance state so debug-mode sliders
         # (or a curriculum callback) can change them at runtime without
         # touching CAR_CONFIG.
-        self.max_force = float(self._cfg["max_force"])
-        self.target_velocity = float(self._cfg["target_velocity"])
+        self.max_torque = float(self._cfg["max_torque"])
+        self.steer_force = float(self._cfg.get("steer_force", 50.0))
+
+        # PyBullet's default joint motor is a velocity controller that resists
+        # any imposed torque. Zero its force on the drive joints so our
+        # TORQUE_CONTROL commands aren't fought by the default motor.
+        self._disable_default_motors(self.drive_joints)
 
         if color is not None:
             self._tint(color)
+
+    def _disable_default_motors(self, joint_indices: Sequence[int]) -> None:
+        for j in joint_indices:
+            p.setJointMotorControl2(
+                self.body, j, p.VELOCITY_CONTROL,
+                targetVelocity=0.0, force=0.0,
+                physicsClientId=self.client,
+            )
 
     # ── Joint discovery ────────────────────────────────────────────────
     def _discover_joints(self) -> Tuple[List[int], List[int]]:
@@ -85,39 +98,32 @@ class RaceCar:
     def apply_action(self, steer: float, throttle: float) -> None:
         """Steer and throttle in [-1, 1].
 
-        Throttle controls drive-wheel velocity; steer sets the front-wheel
-        angle. Negative throttle reverses (handy for the human debug mode).
+        Drive wheels are torque-controlled: throttle * max_torque is the
+        signed torque applied to each drive wheel. Steering stays
+        position-controlled (matches how a real car works — you set the
+        wheel angle, not the steering torque).
         """
         steer = float(np.clip(steer, -1.0, 1.0))
         throttle = float(np.clip(throttle, -1.0, 1.0))
         s_target = steer * self._cfg["max_steer"]
-        v_target = throttle * self.target_velocity
-        force = self.max_force
+        drive_torque = throttle * self.max_torque
 
         for j in self.steer_joints:
             p.setJointMotorControl2(
                 self.body, j, p.POSITION_CONTROL,
-                targetPosition=s_target, force=force * 4,
+                targetPosition=s_target, force=self.steer_force,
                 physicsClientId=self.client,
             )
         for j in self.drive_joints:
             p.setJointMotorControl2(
-                self.body, j, p.VELOCITY_CONTROL,
-                targetVelocity=v_target, force=force,
+                self.body, j, p.TORQUE_CONTROL,
+                force=drive_torque,
                 physicsClientId=self.client,
             )
 
-    def set_max_force(self, force: float) -> None:
-        """Update the drive-wheel max force (Newtons). Picked up next step."""
-        self.max_force = float(force)
-
-    def set_target_velocity(self, velocity: float) -> None:
-        """Update drive-wheel target angular velocity (rad/s) at full throttle.
-
-        Top road speed ≈ velocity × wheel_radius (the default racecar URDF
-        has ~0.08 m wheels, so 100 rad/s ≈ 8 m/s).
-        """
-        self.target_velocity = float(velocity)
+    def set_max_torque(self, torque: float) -> None:
+        """Update the per-drive-wheel torque (N·m) at full throttle."""
+        self.max_torque = float(torque)
 
     def set_traction(self, lateral_friction: float) -> None:
         """Set lateral friction on every wheel link (drive + steer).
@@ -140,7 +146,7 @@ class RaceCar:
             p.resetJointState(self.body, j, 0.0, 0.0,
                               physicsClientId=self.client)
 
-    # ── State ───────────────────────────────────────────────────────────────────────
+    # ── State ─────────────────────────────────────────────────────────────────────────
     def get_state(self) -> dict:
         pos, orn = p.getBasePositionAndOrientation(self.body,
                                                     physicsClientId=self.client)

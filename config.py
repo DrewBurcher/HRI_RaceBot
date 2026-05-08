@@ -30,10 +30,11 @@ TRACK_CONFIG = {
 # ── Car ─────────────────────────────────────────────────────────────────────────
 CAR_CONFIG = {
     "urdf": "racecar/racecar.urdf",   # ships with pybullet_data
-    "max_force": 50.0,                # motor force (N) per drive wheel
+    "max_torque": 5.0,                # N·m per drive wheel at full throttle
+                                       # (drive joints use TORQUE_CONTROL, top
+                                       # speed emerges from friction/slip)
     "max_steer": 0.6,                 # steering range (rad)
-    "target_velocity": 100.0,         # rad/s target on drive wheels at throttle=1
-                                       # (≈ 8 m/s with the default racecar wheels)
+    "steer_force": 50.0,              # N·m holding torque on the steer servos
     "spawn_z": 0.05,
 }
 

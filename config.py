@@ -11,6 +11,11 @@ SIM_CONFIG = {
     "policy_freq": 30,             # how often the RL policy acts (Hz)
     "max_episode_steps": 1500,     # ~50 s per race at 30 Hz
     "gravity": -9.81,
+    # First-order low-pass on the (steer, drive_velocity) action before it
+    # reaches PyBullet:  smoothed = α·new + (1−α)·prev
+    # 1.0 = no smoothing (raw RL output), 0.0 = action frozen.
+    # 0.5 cuts most of the high-frequency jitter while keeping ~70 ms response.
+    "action_lp_alpha": 0.5,
 }
 
 # ── Track geometry ───────────────────────────────────────────────────────
@@ -79,7 +84,7 @@ REWARD_CONFIG = {
     "flip_penalty":             -100.0,
 }
 
-# ── RL hyperparameters ─────────────────────────────────────────────────────────
+# ── RL hyperparameters ─────────────────────────────────────────────────────
 PPO_CONFIG = {
     "learning_rate": 3e-4,
     "n_steps": 2048,

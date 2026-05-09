@@ -10,20 +10,24 @@ The env is intentionally agnostic about *who* is driving — the agent classes
 in `agents/` plug in cleanly. That makes it easy to mix RL policies, scripted
 opponents, and human drivers (debug mode) without changing this file.
 
-Observation (per car, 18 dims, dtype float32):
+Observation (per car, 15 dims, dtype float32):
    [0:3]   position (world frame, x y z)
-   [3:6]   forward unit vector (world frame) — captures heading
-   [6:9]   vector from car to closest centerline point  (CAR FRAME)
-   [9]     steering angle (rad)
-   [10]    steering rate  (rad/s)
-   [11]    rear-wheel angular velocity (rad/s)
-   [12:15] vector to other car          (CAR FRAME)
-   [15:18] velocity-difference vector   (CAR FRAME, opp_vel - own_vel)
+   [3:5]   forward unit vector (world frame, xy) — heading, no z (2D track)
+   [5:7]   vector to closest centerline point  (CAR FRAME, xy)
+   [7]     steering angle (rad)
+   [8]     steering rate  (rad/s)
+   [9]     rear-wheel angular velocity (rad/s)
+   [10]    yaw angular velocity (rad/s) — how fast the car is rotating
+   [11:13] vector to other car          (CAR FRAME, xy)
+   [13:15] velocity-difference vector   (CAR FRAME, xy, opp_vel - own_vel)
 
 Action (per car, 2 dims):
    [0]  steering target,         scaled by max_steer
    [1]  drive-velocity target,   scaled by vel_target_scale → fed to a PD
                                   with asymmetric torque clamp
+A first-order low-pass filter (SIM_CONFIG['action_lp_alpha']) is applied
+before each action reaches the car — RL output stays jittery, but the car
+sees a smoothed command.
 """
 
 from __future__ import annotations
@@ -84,13 +88,15 @@ class TwoCarRaceEnv(gym.Env):
         self._reward_components: Dict[str, Dict[str, float]] = {}
         # Most-recent DR sample, surfaced in info for tensorboard logging.
         self._dr_params: Dict[str, float] = {}
+        # Low-pass-filter state: smoothed action per car (zeroed on reset).
+        self._smoothed_action: Dict[str, np.ndarray] = {}
 
         self._rng = np.random.default_rng(seed)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                         shape=(2,), dtype=np.float32)
-        # See module docstring for the 18-dim observation layout.
-        obs_dim = 3 + 3 + 3 + 1 + 1 + 1 + 3 + 3
+        # See module docstring for the 15-dim observation layout.
+        obs_dim = 3 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
                                              shape=(obs_dim,), dtype=np.float32)
 
@@ -146,6 +152,9 @@ class TwoCarRaceEnv(gym.Env):
         self._finished = {a: False for a in self.agent_ids}
         self._flipped = {a: False for a in self.agent_ids}
         self._reward_components = {a: {} for a in self.agent_ids}
+        # Reset low-pass state — fresh smoothed action per episode.
+        self._smoothed_action = {a: np.zeros(2, dtype=np.float32)
+                                  for a in self.agent_ids}
         self._winner = None
         self._step_count = 0
 
@@ -182,9 +191,21 @@ class TwoCarRaceEnv(gym.Env):
             term = {a: True for a in self.agent_ids}
             return obs, zeros, term, term, info
 
+        # Low-pass-filter the action before it hits PyBullet.  RL outputs
+        # raw, jittery commands at ~30 Hz; smoothing here gives the car a
+        # cleaner control signal without changing what the policy "sees".
+        # The filter is per-car so opponents and learners are both smoothed.
+        alpha = float(SIM_CONFIG.get("action_lp_alpha", 1.0))
         for a, car in self.cars.items():
-            act = actions.get(a, np.zeros(2, dtype=np.float32))
-            car.apply_action(steer=float(act[0]), vel_cmd=float(act[1]))
+            raw = np.asarray(actions.get(a, np.zeros(2, dtype=np.float32)),
+                             dtype=np.float32)
+            raw = np.clip(raw, -1.0, 1.0)
+            prev = self._smoothed_action.get(a)
+            if prev is None:
+                prev = np.zeros(2, dtype=np.float32)
+            sm = alpha * raw + (1.0 - alpha) * prev
+            self._smoothed_action[a] = sm
+            car.apply_action(steer=float(sm[0]), vel_cmd=float(sm[1]))
 
         sub_steps = SIM_CONFIG["control_freq"] // SIM_CONFIG["policy_freq"]
         try:
@@ -221,60 +242,68 @@ class TwoCarRaceEnv(gym.Env):
             obs[a] = self._build_obs(a, states)
         return obs
 
-    def _world_to_car(self, agent_id: str, world_vec: np.ndarray
-                      ) -> np.ndarray:
-        """Rotate a world-frame XYZ vector into the car's local frame.
+    def _world_to_car_xy(self, yaw: float, x: float, y: float
+                          ) -> Tuple[float, float]:
+        """Rotate a world-frame XY vector into the car's local-yaw frame.
 
-        Uses the car's yaw only (z-axis rotation). Roll/pitch are ignored —
-        for a wheeled vehicle on the ground they're tiny and ignoring them
-        keeps the obs interpretable.
+        Roll/pitch ignored — for a wheeled vehicle on the ground they're
+        tiny and ignoring them keeps the obs interpretable. Track is 2D so
+        z components are dropped from all relative-vector observations.
         """
-        car = self.cars[agent_id]
-        eul = car.get_state()["orientation_euler"]
-        yaw = float(eul[2])
         c, s = np.cos(yaw), np.sin(yaw)
-        x, y, z = float(world_vec[0]), float(world_vec[1]), float(world_vec[2])
-        return np.array([ c * x + s * y,
-                          -s * x + c * y,
-                           z], dtype=np.float32)
+        return c * x + s * y, -s * x + c * y
 
     def _build_obs(self, agent_id: str,
                    states: Dict[str, dict]) -> np.ndarray:
         s = states[agent_id]
         pos = s["position"]
         lin = s["linear_velocity"]
+        ang = s["angular_velocity"]
+        eul = s["orientation_euler"]
         car = self.cars[agent_id]
+        yaw = float(eul[2])
 
+        # 1. Position (world frame, xyz). z is kept because flip-detection
+        #    and the spawn baseline use it; only relative *vector* obs lose z.
         pos_w = pos.astype(np.float32)
-        fwd_w = car.forward_unit_vector()
 
+        # 2. Forward unit vector (world frame, xy only).
+        fwd_w = car.forward_unit_vector()
+        fwd_xy = np.array([fwd_w[0], fwd_w[1]], dtype=np.float32)
+
+        # 3. Vector to closest centerline point (CAR FRAME, xy).
         cx, cy = self.track.closest_centerline_point(float(pos[0]), float(pos[1]))
-        to_cl_w = np.array([cx - float(pos[0]),
-                            cy - float(pos[1]),
-                            0.0 - float(pos[2])], dtype=np.float32)
-        to_cl_c = self._world_to_car(agent_id, to_cl_w)
+        cx_local, cy_local = self._world_to_car_xy(
+            yaw, cx - float(pos[0]), cy - float(pos[1]))
 
         steer_angle, steer_rate = car.steering_state()
         rear_wvel = car.rear_wheel_velocity()
+        yaw_rate = float(ang[2])   # world-frame z-axis angular vel ≈ yaw rate
 
+        # 4. Opponent relative pose (CAR FRAME, xy).
         opp_id = next((b for b in self.agent_ids if b != agent_id), agent_id)
         opp = states[opp_id]
-        to_opp_w = (opp["position"] - pos).astype(np.float32)
-        to_opp_c = self._world_to_car(agent_id, to_opp_w)
+        ox_local, oy_local = self._world_to_car_xy(
+            yaw,
+            float(opp["position"][0] - pos[0]),
+            float(opp["position"][1] - pos[1]))
 
-        dvel_w = (opp["linear_velocity"] - lin).astype(np.float32)
-        dvel_c = self._world_to_car(agent_id, dvel_w)
+        # 5. Velocity-difference vector (CAR FRAME, xy).
+        dvel = (opp["linear_velocity"] - lin).astype(np.float32)
+        dvx_local, dvy_local = self._world_to_car_xy(
+            yaw, float(dvel[0]), float(dvel[1]))
 
-        return np.concatenate([
-            pos_w,                                                # [0:3]
-            fwd_w,                                                # [3:6]
-            to_cl_c,                                              # [6:9]
-            np.array([steer_angle], dtype=np.float32),            # [9]
-            np.array([steer_rate], dtype=np.float32),             # [10]
-            np.array([rear_wvel], dtype=np.float32),              # [11]
-            to_opp_c,                                             # [12:15]
-            dvel_c,                                               # [15:18]
-        ]).astype(np.float32)
+        return np.array([
+            pos_w[0], pos_w[1], pos_w[2],          # [0:3]
+            fwd_xy[0], fwd_xy[1],                  # [3:5]
+            cx_local, cy_local,                    # [5:7]
+            steer_angle,                           # [7]
+            steer_rate,                            # [8]
+            rear_wvel,                             # [9]
+            yaw_rate,                              # [10]
+            ox_local, oy_local,                    # [11:13]
+            dvx_local, dvy_local,                  # [13:15]
+        ], dtype=np.float32)
 
     def _signed_lateral(self, x: float, y: float) -> float:
         """Signed lateral offset from the centerline (positive = outside)."""

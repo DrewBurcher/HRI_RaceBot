@@ -22,7 +22,6 @@ Design notes
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import time
@@ -50,11 +49,6 @@ class RewardComponentLogger(BaseCallback):
     """Aggregates per-step reward components into running means and dumps them
     to tensorboard at every algorithm log interval.
 
-    The env writes `info["reward_components"] = {"progress": ..., ...}` each
-    step (see env._build_info). This callback accumulates them so the user
-    can see in tensorboard which terms dominate the total reward and how
-    they evolve as training proceeds.
-
     Also tracks per-episode domain-randomization samples (one new sample
     per reset, deduplicated by signature) and dumps their running means
     under the `dr/*` namespace.
@@ -69,7 +63,6 @@ class RewardComponentLogger(BaseCallback):
         self._losses: int = 0
         self._flips: int = 0
         self._episodes: int = 0
-        # Per-episode DR samples (one new sample per reset).
         self._dr_sums: Dict[str, float] = {}
         self._dr_count: int = 0
         self._last_dr_signature: tuple = ()
@@ -89,7 +82,6 @@ class RewardComponentLogger(BaseCallback):
                     self._losses += 1
             if info.get("flipped"):
                 self._flips += 1
-            # DR is per-episode — only count a new sample when the dict changes.
             dr = info.get("dr_params") or {}
             sig = tuple(sorted(dr.items()))
             if dr and sig != self._last_dr_signature:
@@ -125,8 +117,6 @@ def _make_vec_env(base_env: TwoCarRaceEnv, learner_id: str, opponent,
     wrapper = Monitor(wrapper,
                       filename=os.path.join(log_dir, f"monitor_{learner_tag}"))
     venv = DummyVecEnv([lambda: wrapper])
-    # Normalize obs and (clipped) reward — strongly recommended by SB3 for
-    # continuous control with mixed-scale reward shaping.
     return VecNormalize(venv, norm_obs=True, norm_reward=True,
                          clip_obs=10.0, clip_reward=10.0)
 
@@ -185,13 +175,44 @@ def _race_once(base_env: TwoCarRaceEnv, learners: List[LearnerState]
 def _refresh_opponents(base_env: TwoCarRaceEnv,
                        learners: List[LearnerState],
                        log_dir: str) -> None:
-    """Each learner gets a frozen snapshot of the *other* learner."""
-    snapshots = {L.agent_id: copy.deepcopy(L.model) for L in learners}
+    """Each learner gets a frozen snapshot of the *other* learner.
+
+    Snapshotting via save→load (not copy.deepcopy) — SB3 models hold
+    references to their VecEnv and to PyTorch tensors, so deepcopy
+    intermittently chokes on them. Save/load is bulletproof and only
+    marginally slower.
+
+    Also preserves VecNormalize obs/reward statistics across the refresh.
+    Otherwise we'd reset the running RMS to zero on every refresh, briefly
+    feeding the policy un-normalized observations until stats re-converge.
+    """
+    snapshots: Dict[str, object] = {}
+    for L in learners:
+        tmp_path = os.path.join(log_dir, f".tmp_snapshot_{L.agent_id}.zip")
+        L.model.save(tmp_path)
+        AlgoCls = _make_algo_class(L.algo)
+        snapshots[L.agent_id] = AlgoCls.load(tmp_path, device="cpu")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
     for L in learners:
         opp_id = next(o for o in [x.agent_id for x in learners] if o != L.agent_id)
         opp = FrozenRLAgent(snapshots[opp_id], deterministic=True)
-        L.env = _wrap_for_learner(base_env, L.agent_id, opp,
-                                   log_dir, learner_tag=L.agent_id)
+
+        # Stash old VecNormalize stats before throwing the wrapper away.
+        old_obs_rms = getattr(L.env, "obs_rms", None)
+        old_ret_rms = getattr(L.env, "ret_rms", None)
+
+        new_env = _wrap_for_learner(base_env, L.agent_id, opp,
+                                     log_dir, learner_tag=L.agent_id)
+        if old_obs_rms is not None:
+            new_env.obs_rms = old_obs_rms
+        if old_ret_rms is not None:
+            new_env.ret_rms = old_ret_rms
+
+        L.env = new_env
         L.model.set_env(L.env)
 
 
@@ -209,7 +230,6 @@ def train(algo: str = "ppo",
     base_env = TwoCarRaceEnv(render_mode="human" if render else None,
                               seed=seed)
 
-    # Bootstrap with random opponents so each learner has a valid env from t=0.
     opp_seed = seed + 1
     init_opp = RandomAgent(seed=opp_seed)
 
@@ -228,7 +248,6 @@ def train(algo: str = "ppo",
     print(f"[train] starting head-to-head training of {len(learners)} cars "
           f"({algo.upper()}) for {total_timesteps:,} steps each")
 
-    # One TB callback per learner, namespaced by learner directory.
     tb_callbacks = {L.agent_id: RewardComponentLogger(L.agent_id) for L in learners}
 
     while elapsed_total < total_timesteps:
@@ -289,7 +308,6 @@ def train(algo: str = "ppo",
             json.dump([L.history[-1] for L in learners], f, indent=2)
         print(f"[train] block summary: {wins_this_block}")
 
-    # Final save: model + VecNormalize stats (needed at eval time).
     for L in learners:
         save_path = os.path.join(log_dir, f"{L.agent_id}_{algo}_final")
         L.model.save(save_path)
@@ -299,7 +317,6 @@ def train(algo: str = "ppo",
             print(f"[train] WARN: could not save VecNormalize for {L.agent_id}: {e}")
         print(f"[train] saved {save_path}.zip")
 
-    # Persist final hyperparameters / reward weights / DR config for the report.
     with open(os.path.join(log_dir, "config_snapshot.json"), "w") as f:
         json.dump({
             "algo": algo,

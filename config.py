@@ -67,16 +67,19 @@ RACE_CONFIG = {
 # ── Reward weights ────────────────────────────────────────────────────────────────
 REWARD_CONFIG = {
     # Densely shaped:
-    "progress_reward":           5.0,    # × Δ centerline arc-length per step
+    "progress_reward":          10.0,    # × Δ centerline arc-length per step.
+                                          # The dominant signal — at ~4 m/s
+                                          # this is ~1.3/step, larger than
+                                          # any single penalty so the policy
+                                          # reliably prefers driving forward.
     "speed_reward":              0.05,   # × forward speed (m/s)
     "upright_reward":           -2.0,    # × (roll² + pitch²) — discourage tilting
     "relative_progress_reward":  0.1,    # × (own_lap_arc - opp_lap_arc)
-    "centerline_penalty":       -0.3,    # × |lateral|² (m²) — continuous gradient
-                                          # toward centerline; helps the policy
-                                          # avoid the walls. NO dead zone — the
-                                          # walls already hard-clip extremes; what
-                                          # matters here is a smooth signal.
-    "centerline_dead_zone":      0.0,    # disabled (kept for future tuning)
+    "centerline_penalty":       -0.1,    # × |lateral|² (m²) — soft gradient
+                                          # toward centerline; lighter than
+                                          # progress so it shapes the racing
+                                          # line without dominating.
+    "centerline_dead_zone":      0.0,    # disabled (continuous quadratic)
     # Per-step penalties:
     "wall_collision_penalty":   -20.0,   # while in contact with any wall body
     "car_collision_penalty":    -20.0,   # while in contact with the other car
@@ -88,6 +91,13 @@ REWARD_CONFIG = {
 }
 
 # ── RL hyperparameters ─────────────────────────────────────────────────────
+# Actor / critic architecture — single hidden layer each, asymmetric:
+#   actor (pi) : 14 → 64 → 2     (action policy)
+#   critic     : 14 → 32 → 1     (Q-value or value)
+# This is small but defensible: the obs is only 14 dims and the action only
+# 2 dims, so a tapered single-layer net is plenty of representational
+# capacity. Bigger nets are slower to train and more prone to noise on
+# limited rollouts.
 PPO_CONFIG = {
     "learning_rate": 3e-4,
     "n_steps": 2048,
@@ -99,7 +109,7 @@ PPO_CONFIG = {
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
-    "policy_kwargs": dict(net_arch=[128, 128]),
+    "policy_kwargs": dict(net_arch=dict(pi=[64], vf=[32])),
     "device": "cpu",
     "total_timesteps": 1_000_000,
 }
@@ -112,7 +122,7 @@ SAC_CONFIG = {
     "tau": 0.005,
     "gamma": 0.99,
     "ent_coef": "auto",
-    "policy_kwargs": dict(net_arch=[128, 128]),
+    "policy_kwargs": dict(net_arch=dict(pi=[64], qf=[32])),
     "device": "cpu",
     "total_timesteps": 1_000_000,
 }

@@ -67,11 +67,40 @@ class OvalTrack:
         self.checkpoints: List[Checkpoint] = self._build_checkpoints(
             self.cfg["checkpoint_count"])
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # ── Public API ─────────────────────────────────────────────────────
     def build(self) -> None:
         """Load the ground plane and walls into the active physics client."""
         self._load_plane()
         self._build_geometry()
+        self._draw_centerline_visualization()
+
+    def _draw_centerline_visualization(self,
+                                        color: Tuple[float, float, float] = (1.0, 0.85, 0.0),
+                                        width: float = 3.0,
+                                        n_segments: int = 96) -> None:
+        """Draw the centerline as PyBullet debug lines (visual only).
+
+        These are GUI overlays — no collision, no interaction. Useful for
+        sanity-checking that the policy's `to_centerline` obs and the
+        centerline-penalty term track the physical race line you'd expect.
+        Lines live for the whole sim session (`lifeTime=0`).
+        """
+        perim = self.perimeter()
+        pts: List[Tuple[float, float, float]] = []
+        for i in range(n_segments + 1):
+            s = (i % n_segments) * perim / n_segments
+            (x, y), _ = self._point_at_arclength(s)
+            pts.append((x, y, 0.02))    # slightly above the ground plane
+        for a, b in zip(pts[:-1], pts[1:]):
+            try:
+                p.addUserDebugLine(list(a), list(b),
+                                    lineColorRGB=list(color),
+                                    lineWidth=width,
+                                    lifeTime=0,
+                                    physicsClientId=self.client)
+            except Exception:
+                # DIRECT (headless) clients silently no-op; bail out.
+                break
 
     def spawn_pose(self, lane: int, jitter: float = 0.0
                    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
@@ -189,7 +218,7 @@ class OvalTrack:
         d = math.hypot(x - cx, y)
         return d < r_in or d > r_out
 
-    # ── Internals ──────────────────────────────────────────────────────────
+    # ── Internals ─────────────────────────────────────────────────────
     def _load_plane(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         plane = p.loadURDF("plane.urdf", physicsClientId=self.client)

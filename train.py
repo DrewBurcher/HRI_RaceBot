@@ -13,10 +13,10 @@ Design notes
   races in a row, its training is paused (skipped during the next chunk)
   while the other one keeps learning until the streak is broken.
 * Each training chunk runs N timesteps for the active learner(s); race results
-  are tallied between chunks. This keeps the loop tractable and gives the
-  win-streak logic a natural place to fire.
-* Reward components are logged to tensorboard via RewardComponentLogger so
-  you can see which terms dominate total reward and how that evolves.
+  are tallied between chunks.
+* Reward components AND domain-randomization parameters are logged to
+  tensorboard via RewardComponentLogger so you can see which reward terms
+  dominate and verify the DR distribution is well behaved.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from agents.rl_agent import FrozenRLAgent
 from agents.random_agent import RandomAgent
-from config import PPO_CONFIG, RACE_CONFIG, REWARD_CONFIG, SAC_CONFIG
+from config import DR_CONFIG, PPO_CONFIG, RACE_CONFIG, REWARD_CONFIG, SAC_CONFIG
 from env import SingleAgentRaceWrapper, TwoCarRaceEnv
 
 
@@ -54,6 +54,10 @@ class RewardComponentLogger(BaseCallback):
     step (see env._build_info). This callback accumulates them so the user
     can see in tensorboard which terms dominate the total reward and how
     they evolve as training proceeds.
+
+    Also tracks per-episode domain-randomization samples (one new sample
+    per reset, deduplicated by signature) and dumps their running means
+    under the `dr/*` namespace.
     """
 
     def __init__(self, learner_id: str, verbose: int = 0):
@@ -65,6 +69,10 @@ class RewardComponentLogger(BaseCallback):
         self._losses: int = 0
         self._flips: int = 0
         self._episodes: int = 0
+        # Per-episode DR samples (one new sample per reset).
+        self._dr_sums: Dict[str, float] = {}
+        self._dr_count: int = 0
+        self._last_dr_signature: tuple = ()
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [{}])
@@ -81,6 +89,14 @@ class RewardComponentLogger(BaseCallback):
                     self._losses += 1
             if info.get("flipped"):
                 self._flips += 1
+            # DR is per-episode — only count a new sample when the dict changes.
+            dr = info.get("dr_params") or {}
+            sig = tuple(sorted(dr.items()))
+            if dr and sig != self._last_dr_signature:
+                self._last_dr_signature = sig
+                for k, v in dr.items():
+                    self._dr_sums[k] = self._dr_sums.get(k, 0.0) + float(v)
+                self._dr_count += 1
         return True
 
     def _on_rollout_end(self) -> None:
@@ -93,8 +109,14 @@ class RewardComponentLogger(BaseCallback):
         self.logger.record("race/losses_total", self._losses)
         self.logger.record("race/flips_total", self._flips)
         self.logger.record("race/episodes_total", self._episodes)
+        if self._dr_count > 0:
+            for k, total in self._dr_sums.items():
+                self.logger.record(f"dr/{k}_mean", total / self._dr_count)
+            self.logger.record("dr/episodes_seen", self._dr_count)
         self._sums.clear()
         self._count = 0
+        self._dr_sums.clear()
+        self._dr_count = 0
 
 
 def _make_vec_env(base_env: TwoCarRaceEnv, learner_id: str, opponent,
@@ -223,13 +245,11 @@ def train(algo: str = "ppo",
 
         elapsed_total += CHUNK_TIMESTEPS
 
-        # Periodic opponent refresh
         if elapsed_total >= next_opp_refresh:
             print("[train] refreshing self-play opponents")
             _refresh_opponents(base_env, learners, log_dir)
             next_opp_refresh += OPP_REFRESH_STEPS
 
-        # Evaluation block: race policies head-to-head, update streaks/pauses
         wins_this_block: Dict[str, int] = {L.agent_id: 0 for L in learners}
         for _ in range(EVAL_RACES_PER_CHUNK):
             w = _race_once(base_env, learners)
@@ -244,7 +264,6 @@ def train(algo: str = "ppo",
                 else:
                     L.win_streak = 0
 
-        # Apply pause rule
         for L in learners:
             previously_paused = L.paused
             L.paused = L.win_streak >= win_streak_cap
@@ -270,8 +289,7 @@ def train(algo: str = "ppo",
             json.dump([L.history[-1] for L in learners], f, indent=2)
         print(f"[train] block summary: {wins_this_block}")
 
-    # Final save: model + VecNormalize stats (needed at eval time so
-    # observations are normalized identically).
+    # Final save: model + VecNormalize stats (needed at eval time).
     for L in learners:
         save_path = os.path.join(log_dir, f"{L.agent_id}_{algo}_final")
         L.model.save(save_path)
@@ -281,7 +299,7 @@ def train(algo: str = "ppo",
             print(f"[train] WARN: could not save VecNormalize for {L.agent_id}: {e}")
         print(f"[train] saved {save_path}.zip")
 
-    # Persist final hyperparameters / reward weights for the final report.
+    # Persist final hyperparameters / reward weights / DR config for the report.
     with open(os.path.join(log_dir, "config_snapshot.json"), "w") as f:
         json.dump({
             "algo": algo,
@@ -289,6 +307,7 @@ def train(algo: str = "ppo",
             "sac_config": SAC_CONFIG if algo == "sac" else None,
             "race_config": RACE_CONFIG,
             "reward_config": REWARD_CONFIG,
+            "dr_config": DR_CONFIG,
             "chunk_timesteps": CHUNK_TIMESTEPS,
             "opp_refresh_steps": OPP_REFRESH_STEPS,
             "eval_races_per_chunk": EVAL_RACES_PER_CHUNK,

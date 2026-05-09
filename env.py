@@ -35,7 +35,7 @@ from gymnasium import spaces
 import numpy as np
 import pybullet as p
 
-from config import (CAR_CONFIG, RACE_CONFIG, REWARD_CONFIG,
+from config import (CAR_CONFIG, DR_CONFIG, RACE_CONFIG, REWARD_CONFIG,
                      SIM_CONFIG, TRACK_CONFIG)
 from racecar import RaceCar
 from track import OvalTrack, build_track
@@ -82,6 +82,8 @@ class TwoCarRaceEnv(gym.Env):
         self._winner: Optional[str] = None
         self._flipped: Dict[str, bool] = {}
         self._reward_components: Dict[str, Dict[str, float]] = {}
+        # Most-recent DR sample, surfaced in info for tensorboard logging.
+        self._dr_params: Dict[str, float] = {}
 
         self._rng = np.random.default_rng(seed)
 
@@ -147,6 +149,14 @@ class TwoCarRaceEnv(gym.Env):
         self._winner = None
         self._step_count = 0
 
+        # Domain randomization: sample once per episode, apply to BOTH cars
+        # (so head-to-head racing stays fair within an episode but the
+        #  dynamics vary across episodes).
+        self._dr_params = self._sample_dr_params() if DR_CONFIG.get("enabled") \
+            else {}
+        if self._dr_params:
+            self._apply_dr_params(self._dr_params)
+
         for a, car in self.cars.items():
             x, y, _ = car.get_state()["position"]
             prog = self.track.centerline_progress(x, y)
@@ -157,11 +167,12 @@ class TwoCarRaceEnv(gym.Env):
             p.stepSimulation(physicsClientId=self.client)
 
         obs = self._build_obs_all()
-        info = {a: {"lane": lanes[i], "jitter": jitter}
+        info = {a: {"lane": lanes[i], "jitter": jitter,
+                    "dr_params": dict(self._dr_params)}
                 for i, a in enumerate(self.agent_ids)}
         return obs, info
 
-    # ── Step ──────────────────────────────────────────────────────────────────────────
+    # ── Step ───────────────────────────────────────────────────────────────────────
     def step(self, actions: Dict[str, np.ndarray]
              ) -> Tuple[Dict[str, np.ndarray], Dict[str, float],
                         Dict[str, bool], Dict[str, bool], Dict[str, dict]]:
@@ -202,7 +213,7 @@ class TwoCarRaceEnv(gym.Env):
             info["__race_index__"] = self._race_index
         return obs, rewards, terminated, truncated, info
 
-    # ── Observation builder ───────────────────────────────────────────────
+    # ── Observation builder ─────────────────────────────────────────────
     def _build_obs_all(self) -> Dict[str, np.ndarray]:
         obs = {}
         states = {a: c.get_state() for a, c in self.cars.items()}
@@ -274,6 +285,77 @@ class TwoCarRaceEnv(gym.Env):
         cx = sl / 2.0 if x > 0 else -sl / 2.0
         d = float(np.hypot(x - cx, y))
         return d - r
+
+    # ── Domain randomization ─────────────────────────────────────────────────
+    def _sample_dr_params(self) -> Dict[str, float]:
+        """Sample per-episode DR values from N(default, std_pct·|default|),
+        clamped to [clip_lo, clip_hi]·default. Returns {} if DR disabled.
+
+        Symmetric clamp handles negative defaults (e.g. gravity = -9.81).
+        """
+        cfg = DR_CONFIG
+        if not cfg.get("enabled"):
+            return {}
+        s = float(cfg["std_pct"])
+        lo = float(cfg["clip_lo_pct"])
+        hi = float(cfg["clip_hi_pct"])
+        rng = self._rng
+
+        def clip_around(default: float, value: float) -> float:
+            b1 = lo * default
+            b2 = hi * default
+            return float(np.clip(value, min(b1, b2), max(b1, b2)))
+
+        def sample_around(default: float) -> float:
+            v = float(rng.normal(default, s * abs(default)))
+            return clip_around(default, v)
+
+        params: Dict[str, float] = {}
+        wanted = set(cfg.get("params", []))
+
+        if "max_drive_torque" in wanted:
+            params["max_drive_torque"] = sample_around(
+                CAR_CONFIG["max_drive_torque"])
+        if "traction" in wanted:
+            # default μ = 1.0; use the same std_pct around it
+            params["traction"] = clip_around(
+                1.0, float(rng.normal(1.0, s)))
+        if "gravity" in wanted:
+            params["gravity"] = sample_around(SIM_CONFIG["gravity"])
+        if "car_mass" in wanted:
+            # Read the (URDF-defined) baseline once, then perturb.
+            if not hasattr(self, "_baseline_chassis_mass"):
+                first_car = next(iter(self.cars.values()))
+                self._baseline_chassis_mass = first_car.chassis_mass()
+            params["car_mass"] = sample_around(self._baseline_chassis_mass)
+        if "dt" in wanted:
+            params["dt"] = sample_around(1.0 / SIM_CONFIG["control_freq"])
+
+        return params
+
+    def _apply_dr_params(self, params: Dict[str, float]) -> None:
+        """Push sampled DR values into PyBullet + RaceCar instance state.
+
+        Brake torque scales proportionally with drive torque so the asymmetric
+        ratio (≈ 2x braking) stays consistent under DR.
+        """
+        if "gravity" in params:
+            p.setGravity(0, 0, float(params["gravity"]),
+                          physicsClientId=self.client)
+        if "dt" in params:
+            p.setTimeStep(float(params["dt"]),
+                           physicsClientId=self.client)
+
+        brake_ratio = (CAR_CONFIG["max_brake_torque"]
+                        / CAR_CONFIG["max_drive_torque"])
+        for car in self.cars.values():
+            if "max_drive_torque" in params:
+                car.set_max_drive_torque(params["max_drive_torque"])
+                car.set_max_brake_torque(params["max_drive_torque"] * brake_ratio)
+            if "traction" in params:
+                car.set_traction(params["traction"])
+            if "car_mass" in params:
+                car.set_chassis_mass(params["car_mass"])
 
     def _check_collisions(self, car: RaceCar) -> Tuple[bool, bool]:
         """Return (hit_wall, hit_other_car) for the given car.
@@ -386,6 +468,7 @@ class TwoCarRaceEnv(gym.Env):
                 "finished": self._finished[a],
                 "flipped": self._flipped[a],
                 "reward_components": dict(self._reward_components.get(a, {})),
+                "dr_params": dict(self._dr_params),
             }
         return info
 

@@ -2,7 +2,7 @@
 Head-to-head evaluation — run N races between two trained policies.
 
 Usage:
-    python evaluate.py --run runs/duo_ppo_123 --algo ppo --episodes 20 [--render]
+    python evaluate.py --run runs/duo_sac_123 --episodes 20 [--render]
 
 Looks for `car_0_<algo>_final.zip` and `car_1_<algo>_final.zip` inside the
 run directory.
@@ -18,7 +18,7 @@ from agents.rl_agent import RLAgent
 from env import TwoCarRaceEnv
 
 
-def evaluate(run_dir: str, algo: str = "ppo", episodes: int = 10,
+def evaluate(run_dir: str, algo: str = "sac", episodes: int = 10,
              render: bool = False, seed: int = 0) -> Dict[str, int]:
     env = TwoCarRaceEnv(render_mode="human" if render else None, seed=seed)
     obs, _ = env.reset()
@@ -57,8 +57,8 @@ def evaluate(run_dir: str, algo: str = "ppo", episodes: int = 10,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run", required=True, help="Run dir (e.g. runs/duo_ppo_123)")
-    parser.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    parser.add_argument("--run", required=True, help="Run dir (e.g. runs/duo_sac_123)")
+    parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--seed", type=int, default=0)

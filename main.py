@@ -3,9 +3,13 @@ Main CLI entry point for HRI_RaceBot.
 
 Usage:
     python main.py demo                            # random-action sanity demo
-    python main.py debug [--opponent random|rl|human] [--opp-model PATH] [--algo ppo|sac]
-    python main.py train --algo ppo --timesteps 1000000 [--name my_run]
-    python main.py race  --run runs/duo_ppo_xxx --algo ppo [--episodes 10] [--render]
+    python main.py debug [--opponent random|rl|human] [--opp-model PATH] [--algo sac|ppo]
+    python main.py train [--algo sac|ppo] --timesteps 1000000 [--name my_run]
+    python main.py race  --run runs/duo_sac_xxx [--algo sac|ppo] [--episodes 10] [--render]
+
+Default algo is SAC: off-policy + replay buffer is much more sample-efficient
+than PPO for continuous control with mixed-scale rewards on a single env.
+PPO is still available via `--algo ppo`.
 """
 
 from __future__ import annotations
@@ -78,12 +82,12 @@ def main():
     p_debug.add_argument("--opponent", choices=["random", "rl", "human"],
                           default="random")
     p_debug.add_argument("--opp-model", type=str, default=None)
-    p_debug.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    p_debug.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     p_debug.add_argument("--both", action="store_true")
     p_debug.set_defaults(func=_cmd_debug)
 
     p_tr = sub.add_parser("train", help="Train two RL policies head-to-head")
-    p_tr.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    p_tr.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     p_tr.add_argument("--timesteps", type=int, default=1_000_000)
     p_tr.add_argument("--name", type=str, default=None)
     p_tr.add_argument("--render", action="store_true")
@@ -92,7 +96,7 @@ def main():
 
     p_rc = sub.add_parser("race", help="Race two trained policies")
     p_rc.add_argument("--run", required=True)
-    p_rc.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    p_rc.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     p_rc.add_argument("--episodes", type=int, default=10)
     p_rc.add_argument("--render", action="store_true")
     p_rc.add_argument("--seed", type=int, default=0)

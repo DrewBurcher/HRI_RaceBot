@@ -35,12 +35,17 @@ python main.py demo
 # Drive a car yourself (WASD; click the PyBullet window for keyboard focus)
 python main.py debug
 
-# Train two PPO policies head-to-head
-python main.py train --algo ppo --timesteps 1000000
+# Train two SAC policies head-to-head (SAC is the default; --algo ppo also works)
+python main.py train --timesteps 1000000
 
 # Race the trained models
-python main.py race --run runs/<run_name> --algo ppo --episodes 10 --render
+python main.py race --run runs/<run_name> --episodes 10 --render
 ```
+
+**Default algorithm is SAC.** SAC's off-policy replay buffer is much more
+sample-efficient than PPO for continuous control on a single env, and it
+handles the mixed-scale dense + sparse rewards better in practice. PPO is
+still wired up — pass `--algo ppo` to either subcommand.
 
 ## Observation, action, reward
 
@@ -146,7 +151,7 @@ entirely by setting `DR_CONFIG["enabled"] = False`.
 
 `tensorboard --logdir runs/<run_name>/tb` shows:
 
-- **Default SB3 scalars** (PPO loss curves, ep_rew_mean, ep_len_mean, etc.).
+- **Default SB3 scalars** (algo loss curves, ep_rew_mean, ep_len_mean, etc.).
 - `reward_components/*` — per-step running mean of every reward term, so
   you can see which terms dominate and whether shaping is balanced.
 - `race/wins_total`, `race/losses_total`, `race/flips_total`,
@@ -157,7 +162,7 @@ entirely by setting `DR_CONFIG["enabled"] = False`.
 `runs/<name>/config_snapshot.json` saves the full `RACE_CONFIG`,
 `REWARD_CONFIG`, `DR_CONFIG`, and algo hyperparams used for the run.
 
-## Branch / PR
+## Branch
 
-Development happens on `claude/setup-hri-racebot-s0Po3`; the active PR is
-[#1](https://github.com/DrewBurcher/HRI_RaceBot/pull/1).
+Active development happens on `claude/setup-hri-racebot-s0Po3`; merged PRs
+land on `main`.

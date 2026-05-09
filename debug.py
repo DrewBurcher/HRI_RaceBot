@@ -4,7 +4,7 @@ Manual debugging mode — drive a car yourself.
 Usage:
     python debug.py                  # drive car_0 with WASD; opponent is random
     python debug.py --opponent random
-    python debug.py --opponent rl --opp-model runs/duo_ppo_xxx/car_1_ppo_final --algo ppo
+    python debug.py --opponent rl --opp-model runs/duo_sac_xxx/car_1_sac_final
     python debug.py --both           # both cars driven by the keyboard
 
 The PyBullet GUI window must have keyboard focus for input to register.
@@ -25,8 +25,6 @@ from config import CAR_CONFIG
 from env import TwoCarRaceEnv
 
 
-# Slider ranges. Defaults come from CAR_CONFIG so the slider initial value
-# matches the env's launch behavior.
 _DRIVE_MIN, _DRIVE_MAX = 0.1, 30.0
 _BRAKE_MIN, _BRAKE_MAX = 0.1, 60.0
 _TRACTION_MIN, _TRACTION_MAX = 0.1, 3.0
@@ -84,7 +82,7 @@ def main():
     parser.add_argument("--opponent", choices=["random", "rl", "human"],
                         default="random")
     parser.add_argument("--opp-model", type=str, default=None)
-    parser.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--both", action="store_true",
                         help="Drive both cars with the keyboard")
     parser.add_argument("--seed", type=int, default=0)
@@ -99,7 +97,7 @@ def main():
            else _build_opponent(args.opponent, args.opp_model, args.algo))
 
     sliders = _add_sliders(env.client)
-    last_traction = -1.0      # force a set_traction on the first frame
+    last_traction = -1.0
 
     print("=" * 60)
     print("  HRI_RaceBot — manual debugging mode")

@@ -5,7 +5,8 @@ Design notes
 ------------
 * One stable-baselines3 model per car. Each is wrapped around the same
   underlying `TwoCarRaceEnv`, with a `SingleAgentRaceWrapper` exposing only
-  that car's view to its learner.
+  that car's view to its learner. Each learner's VecEnv is wrapped in
+  VecNormalize for obs + (clipped) reward normalization.
 * Self-play: each learner sees a frozen copy of the *other* learner as its
   opponent. The opponent snapshots refresh every `OPP_REFRESH_STEPS`.
 * Win-streak pause: if one model wins `RACE_CONFIG['win_streak_pause']`
@@ -14,9 +15,8 @@ Design notes
 * Each training chunk runs N timesteps for the active learner(s); race results
   are tallied between chunks. This keeps the loop tractable and gives the
   win-streak logic a natural place to fire.
-
-This file is a working *starting point*; the chunk size / refresh schedule
-are obvious tuning targets once you see how training is going.
+* Reward components are logged to tensorboard via RewardComponentLogger so
+  you can see which terms dominate total reward and how that evolves.
 """
 
 from __future__ import annotations
@@ -31,18 +31,82 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from stable_baselines3 import PPO, SAC
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from agents.rl_agent import FrozenRLAgent
 from agents.random_agent import RandomAgent
-from config import PPO_CONFIG, RACE_CONFIG, SAC_CONFIG
+from config import PPO_CONFIG, RACE_CONFIG, REWARD_CONFIG, SAC_CONFIG
 from env import SingleAgentRaceWrapper, TwoCarRaceEnv
 
 
 CHUNK_TIMESTEPS = 25_000          # per learner per chunk
 OPP_REFRESH_STEPS = 50_000        # how often each learner sees a fresh snapshot
 EVAL_RACES_PER_CHUNK = 5          # races used to count wins between chunks
+
+
+class RewardComponentLogger(BaseCallback):
+    """Aggregates per-step reward components into running means and dumps them
+    to tensorboard at every algorithm log interval.
+
+    The env writes `info["reward_components"] = {"progress": ..., ...}` each
+    step (see env._build_info). This callback accumulates them so the user
+    can see in tensorboard which terms dominate the total reward and how
+    they evolve as training proceeds.
+    """
+
+    def __init__(self, learner_id: str, verbose: int = 0):
+        super().__init__(verbose)
+        self.learner_id = learner_id
+        self._sums: Dict[str, float] = {}
+        self._count: int = 0
+        self._wins: int = 0
+        self._losses: int = 0
+        self._flips: int = 0
+        self._episodes: int = 0
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [{}])
+        for info in infos:
+            comp = info.get("reward_components") or {}
+            for k, v in comp.items():
+                self._sums[k] = self._sums.get(k, 0.0) + float(v)
+            self._count += 1
+            if "winner" in info:
+                self._episodes += 1
+                if info.get("is_winner"):
+                    self._wins += 1
+                else:
+                    self._losses += 1
+            if info.get("flipped"):
+                self._flips += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self._count == 0:
+            return
+        for k, total in self._sums.items():
+            self.logger.record(f"reward_components/{k}",
+                               total / max(self._count, 1))
+        self.logger.record("race/wins_total", self._wins)
+        self.logger.record("race/losses_total", self._losses)
+        self.logger.record("race/flips_total", self._flips)
+        self.logger.record("race/episodes_total", self._episodes)
+        self._sums.clear()
+        self._count = 0
+
+
+def _make_vec_env(base_env: TwoCarRaceEnv, learner_id: str, opponent,
+                   log_dir: str, learner_tag: str) -> VecNormalize:
+    wrapper = SingleAgentRaceWrapper(base_env, learner_id, opponent)
+    wrapper = Monitor(wrapper,
+                      filename=os.path.join(log_dir, f"monitor_{learner_tag}"))
+    venv = DummyVecEnv([lambda: wrapper])
+    # Normalize obs and (clipped) reward — strongly recommended by SB3 for
+    # continuous control with mixed-scale reward shaping.
+    return VecNormalize(venv, norm_obs=True, norm_reward=True,
+                         clip_obs=10.0, clip_reward=10.0)
 
 
 @dataclass
@@ -73,10 +137,8 @@ def _make_model(algo: str, env, log_dir: str):
 
 def _wrap_for_learner(base_env: TwoCarRaceEnv, learner_id: str,
                       opponent, log_dir: str, learner_tag: str):
-    wrapper = SingleAgentRaceWrapper(base_env, learner_id, opponent)
-    wrapper = Monitor(wrapper,
-                      filename=os.path.join(log_dir, f"monitor_{learner_tag}"))
-    return DummyVecEnv([lambda: wrapper])
+    return _make_vec_env(base_env, learner_id, opponent,
+                          log_dir, learner_tag)
 
 
 def _race_once(base_env: TwoCarRaceEnv, learners: List[LearnerState]
@@ -144,6 +206,9 @@ def train(algo: str = "ppo",
     print(f"[train] starting head-to-head training of {len(learners)} cars "
           f"({algo.upper()}) for {total_timesteps:,} steps each")
 
+    # One TB callback per learner, namespaced by learner directory.
+    tb_callbacks = {L.agent_id: RewardComponentLogger(L.agent_id) for L in learners}
+
     while elapsed_total < total_timesteps:
         for L in learners:
             if L.paused:
@@ -151,7 +216,9 @@ def train(algo: str = "ppo",
                 continue
             print(f"[train] {L.agent_id}: learning {CHUNK_TIMESTEPS:,} steps")
             L.model.learn(total_timesteps=CHUNK_TIMESTEPS,
-                           reset_num_timesteps=False, progress_bar=False)
+                           reset_num_timesteps=False, progress_bar=False,
+                           callback=tb_callbacks[L.agent_id],
+                           tb_log_name=L.agent_id)
             L.timesteps += CHUNK_TIMESTEPS
 
         elapsed_total += CHUNK_TIMESTEPS
@@ -203,11 +270,29 @@ def train(algo: str = "ppo",
             json.dump([L.history[-1] for L in learners], f, indent=2)
         print(f"[train] block summary: {wins_this_block}")
 
-    # Final save
+    # Final save: model + VecNormalize stats (needed at eval time so
+    # observations are normalized identically).
     for L in learners:
         save_path = os.path.join(log_dir, f"{L.agent_id}_{algo}_final")
         L.model.save(save_path)
+        try:
+            L.env.save(os.path.join(log_dir, f"{L.agent_id}_vecnormalize.pkl"))
+        except Exception as e:
+            print(f"[train] WARN: could not save VecNormalize for {L.agent_id}: {e}")
         print(f"[train] saved {save_path}.zip")
+
+    # Persist final hyperparameters / reward weights for the final report.
+    with open(os.path.join(log_dir, "config_snapshot.json"), "w") as f:
+        json.dump({
+            "algo": algo,
+            "ppo_config": PPO_CONFIG if algo == "ppo" else None,
+            "sac_config": SAC_CONFIG if algo == "sac" else None,
+            "race_config": RACE_CONFIG,
+            "reward_config": REWARD_CONFIG,
+            "chunk_timesteps": CHUNK_TIMESTEPS,
+            "opp_refresh_steps": OPP_REFRESH_STEPS,
+            "eval_races_per_chunk": EVAL_RACES_PER_CHUNK,
+        }, f, indent=2)
 
     base_env.close()
     return log_dir

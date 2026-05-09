@@ -50,7 +50,7 @@ CAR_JOINT_PATTERNS = {
     "rear":  ["left_rear_wheel_joint", "right_rear_wheel_joint"],
 }
 
-# ── Race rules ───────────────────────────────────────────────────────────────
+# ── Race rules ──────────────────────────────────────────────────────────────
 RACE_CONFIG = {
     "num_cars": 2,
     "laps_to_finish": 1,
@@ -79,7 +79,7 @@ REWARD_CONFIG = {
     "flip_penalty":             -100.0,
 }
 
-# ── RL hyperparameters ──────────────────────────────────────────────────────────
+# ── RL hyperparameters ─────────────────────────────────────────────────────────
 PPO_CONFIG = {
     "learning_rate": 3e-4,
     "n_steps": 2048,
@@ -107,4 +107,29 @@ SAC_CONFIG = {
     "policy_kwargs": dict(net_arch=[128, 128]),
     "device": "cpu",
     "total_timesteps": 1_000_000,
+}
+
+# ── Domain randomization ──────────────────────────────────────────────────────
+# Per-episode: at every reset, sample one value per parameter from
+#   N(default, std_pct × |default|)
+# and apply it to BOTH cars (so the race stays fair within an episode).
+# Values are clamped to [clip_lo_pct, clip_hi_pct] × default so a bad draw
+# never destabilizes the sim. Both cars see the same dynamics, but the
+# dynamics themselves vary across episodes — gives the policies robustness
+# to small parameter mis-specification without changing the action /
+# observation API. The DR values are NOT exposed to the policy or the
+# critic (see comments in env.py / train.py).
+DR_CONFIG = {
+    "enabled": True,
+    "std_pct": 0.10,            # gaussian std as fraction of default
+    "clip_lo_pct": 0.7,         # safety clip lower bound
+    "clip_hi_pct": 1.3,         # safety clip upper bound
+    # Which knobs participate. Comment one out to pin it.
+    "params": [
+        "max_drive_torque",     # CAR_CONFIG["max_drive_torque"]
+        "traction",             # wheel lateral friction (default μ = 1.0)
+        "gravity",              # SIM_CONFIG["gravity"]
+        "car_mass",             # PyBullet chassis-link mass
+        "dt",                   # 1 / SIM_CONFIG["control_freq"]
+    ],
 }

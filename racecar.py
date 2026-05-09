@@ -161,6 +161,21 @@ class RaceCar:
                               lateralFriction=float(lateral_friction),
                               physicsClientId=self.client)
 
+    def chassis_mass(self) -> float:
+        """Current chassis-link mass (kg). Used as the DR baseline."""
+        info = p.getDynamicsInfo(self.body, -1, physicsClientId=self.client)
+        return float(info[0])
+
+    def set_chassis_mass(self, mass: float) -> None:
+        """Override the chassis (base-link) mass at runtime.
+
+        Wheels keep their default mass — only the base link is touched.
+        Used by domain randomization in env.reset().
+        """
+        p.changeDynamics(self.body, -1,
+                          mass=float(mass),
+                          physicsClientId=self.client)
+
     def reset(self, position: Sequence[float], orientation: Sequence[float]) -> None:
         p.resetBasePositionAndOrientation(
             self.body, list(position), list(orientation),
@@ -171,7 +186,7 @@ class RaceCar:
             p.resetJointState(self.body, j, 0.0, 0.0,
                               physicsClientId=self.client)
 
-    # ── State ────────────────────────────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────────────────────────────
     def get_state(self) -> dict:
         pos, orn = p.getBasePositionAndOrientation(self.body,
                                                     physicsClientId=self.client)
@@ -190,7 +205,7 @@ class RaceCar:
         lin_vel, _ = p.getBaseVelocity(self.body, physicsClientId=self.client)
         return float(np.linalg.norm(lin_vel[:2]))
 
-    # ── Joint sensors (for the observation builder) ─────────────────────
+    # ── Joint sensors (for the observation builder) ───────────────────
     def steering_state(self) -> Tuple[float, float]:
         """Return (steering_angle, steering_rate) averaged across steer joints."""
         if not self.steer_joints:

@@ -11,6 +11,11 @@ SIM_CONFIG = {
     "policy_freq": 30,             # how often the RL policy acts (Hz)
     "max_episode_steps": 1500,     # ~50 s per race at 30 Hz
     "gravity": -9.81,
+    # First-order low-pass on the (steer, drive_velocity) action before it
+    # reaches PyBullet:  smoothed = α·new + (1−α)·prev
+    # 1.0 = no smoothing (raw RL output), 0.0 = action frozen.
+    # 0.5 cuts most of the high-frequency jitter while keeping ~70 ms response.
+    "action_lp_alpha": 0.5,
 }
 
 # ── Track geometry ───────────────────────────────────────────────────────
@@ -30,10 +35,14 @@ TRACK_CONFIG = {
 # ── Car ─────────────────────────────────────────────────────────────────────────
 CAR_CONFIG = {
     "urdf": "racecar/racecar.urdf",   # ships with pybullet_data
-    "max_torque": 5.0,                # N·m per drive wheel at full throttle
-                                       # (drive joints use TORQUE_CONTROL, top
-                                       # speed emerges from friction/slip)
-    "max_steer": 0.6,                 # steering range (rad)
+    # Asymmetric torque limits — brakes can apply more force than the motor.
+    "max_drive_torque": 5.0,          # N·m forward, per drive wheel
+    "max_brake_torque": 10.0,         # N·m reverse, per drive wheel (~2x)
+    "drive_kp": 0.5,                  # PD gain on (v_target - v_curr) → torque
+    "vel_target_scale": 500.0,        # action[1]=±1 → ±500 rad/s velocity target
+                                       # (high enough that PD saturates the
+                                       #  torque clamp; no real top-speed cap)
+    "max_steer": 0.6,                 # steering range (rad) — action[0]=±1
     "steer_force": 50.0,              # N·m holding torque on the steer servos
     "spawn_z": 0.05,
 }
@@ -43,21 +52,36 @@ CAR_JOINT_PATTERNS = {
     "steer": ["steering_hinge"],                              # both front wheels
     "drive": ["left_rear_wheel_joint", "right_rear_wheel_joint",
                "left_front_wheel_joint", "right_front_wheel_joint"],
+    "rear":  ["left_rear_wheel_joint", "right_rear_wheel_joint"],
 }
 
-# ── Race rules ──────────────────────────────────────────────────────────
+# ── Race rules ──────────────────────────────────────────────────────────────
 RACE_CONFIG = {
     "num_cars": 2,
     "laps_to_finish": 1,
     "win_streak_pause": 3,        # pause a model's training after N consecutive wins
     "alternate_lanes": True,      # swap inside/outside each race
-    "collision_penalty": -5.0,
-    "off_track_penalty": -10.0,
-    "win_bonus": 50.0,
-    "lose_bonus": -10.0,
-    "checkpoint_reward": 1.0,
-    "progress_reward": 1.0,       # weight on per-step forward progress
-    "speed_reward": 0.05,         # encourage going fast
+    "flip_z_threshold": 0.3,      # car's local +z dot world +z below this → flipped
+}
+
+# ── Reward weights ────────────────────────────────────────────────────────────────
+REWARD_CONFIG = {
+    # Densely shaped:
+    "progress_reward":           5.0,    # × Δ centerline arc-length per step
+    "speed_reward":              0.05,   # × forward speed (m/s)
+    "upright_reward":           -2.0,    # × (roll² + pitch²) — discourage tilting
+    "relative_progress_reward":  0.1,    # × (own_lap_arc - opp_lap_arc)
+    "centerline_penalty":       -1.0,    # × max(0, |lateral|-dead_zone)² (m²)
+    "centerline_dead_zone":      1.5,    # m of grace; matches lane_offset so
+                                          # the racing lanes don't get penalized
+    # Per-step penalties:
+    "wall_collision_penalty":   -20.0,   # while in contact with any wall body
+    "car_collision_penalty":    -20.0,   # while in contact with the other car
+    "off_track_penalty":        -5.0,    # while off the drivable ring
+    # Sparse / terminal:
+    "win_bonus":                 100.0,
+    "lose_penalty":             -20.0,
+    "flip_penalty":             -100.0,
 }
 
 # ── RL hyperparameters ─────────────────────────────────────────────────────
@@ -88,4 +112,29 @@ SAC_CONFIG = {
     "policy_kwargs": dict(net_arch=[128, 128]),
     "device": "cpu",
     "total_timesteps": 1_000_000,
+}
+
+# ── Domain randomization ──────────────────────────────────────────────────────
+# Per-episode: at every reset, sample one value per parameter from
+#   N(default, std_pct × |default|)
+# and apply it to BOTH cars (so the race stays fair within an episode).
+# Values are clamped to [clip_lo_pct, clip_hi_pct] × default so a bad draw
+# never destabilizes the sim. Both cars see the same dynamics, but the
+# dynamics themselves vary across episodes — gives the policies robustness
+# to small parameter mis-specification without changing the action /
+# observation API. The DR values are NOT exposed to the policy or the
+# critic (see comments in env.py / train.py).
+DR_CONFIG = {
+    "enabled": True,
+    "std_pct": 0.10,            # gaussian std as fraction of default
+    "clip_lo_pct": 0.7,         # safety clip lower bound
+    "clip_hi_pct": 1.3,         # safety clip upper bound
+    # Which knobs participate. Comment one out to pin it.
+    "params": [
+        "max_drive_torque",     # CAR_CONFIG["max_drive_torque"]
+        "traction",             # wheel lateral friction (default μ = 1.0)
+        "gravity",              # SIM_CONFIG["gravity"]
+        "car_mass",             # PyBullet chassis-link mass
+        "dt",                   # 1 / SIM_CONFIG["control_freq"]
+    ],
 }

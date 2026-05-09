@@ -67,7 +67,7 @@ class OvalTrack:
         self.checkpoints: List[Checkpoint] = self._build_checkpoints(
             self.cfg["checkpoint_count"])
 
-    # ── Public API ───────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────
     def build(self) -> None:
         """Load the ground plane and walls into the active physics client."""
         self._load_plane()
@@ -150,6 +150,34 @@ class OvalTrack:
     def perimeter(self) -> float:
         return 2.0 * self.straight_length + 2.0 * math.pi * self.curve_radius
 
+    def closest_centerline_point(self, x: float, y: float
+                                  ) -> Tuple[float, float]:
+        """Project (x, y) onto the stadium centerline analytically.
+
+        Returns the (x, y) of the closest point on the centerline ring
+        (z=0, since the centerline lies in the ground plane). Used by the
+        env to build the "vector to centerline" observation and by the
+        centerline-offset reward shaping term.
+        """
+        sl = self.straight_length
+        r = self.curve_radius
+        if x > sl / 2.0:
+            # Right semicircle: project onto the circle of radius r at (sl/2, 0)
+            dx = x - sl / 2.0
+            d = math.hypot(dx, y)
+            if d < 1e-6:
+                return sl / 2.0 + r, 0.0
+            return sl / 2.0 + r * dx / d, r * y / d
+        if x < -sl / 2.0:
+            # Left semicircle: project onto the circle of radius r at (-sl/2, 0)
+            dx = x + sl / 2.0
+            d = math.hypot(dx, y)
+            if d < 1e-6:
+                return -sl / 2.0 - r, 0.0
+            return -sl / 2.0 + r * dx / d, r * y / d
+        # On a straight: pick the nearer one by sign of y.
+        return x, (r if y >= 0 else -r)
+
     def is_off_track(self, x: float, y: float) -> bool:
         """Cheap analytic off-track check (no contact query needed)."""
         sl = self.straight_length
@@ -161,7 +189,7 @@ class OvalTrack:
         d = math.hypot(x - cx, y)
         return d < r_in or d > r_out
 
-    # ── Internals ─────────────────────────────────────────────────────
+    # ── Internals ──────────────────────────────────────────────────────────
     def _load_plane(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         plane = p.loadURDF("plane.urdf", physicsClientId=self.client)

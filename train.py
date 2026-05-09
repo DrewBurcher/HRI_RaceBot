@@ -1,6 +1,9 @@
 """
 Train two RL policies head-to-head on `TwoCarRaceEnv`.
 
+Default algorithm is SAC (off-policy, replay buffer, sample-efficient on
+continuous control). PPO is still wired up via `--algo ppo`.
+
 Design notes
 ------------
 * One stable-baselines3 model per car. Each is wrapped around the same
@@ -201,7 +204,6 @@ def _refresh_opponents(base_env: TwoCarRaceEnv,
         opp_id = next(o for o in [x.agent_id for x in learners] if o != L.agent_id)
         opp = FrozenRLAgent(snapshots[opp_id], deterministic=True)
 
-        # Stash old VecNormalize stats before throwing the wrapper away.
         old_obs_rms = getattr(L.env, "obs_rms", None)
         old_ret_rms = getattr(L.env, "ret_rms", None)
 
@@ -216,7 +218,7 @@ def _refresh_opponents(base_env: TwoCarRaceEnv,
         L.model.set_env(L.env)
 
 
-def train(algo: str = "ppo",
+def train(algo: str = "sac",
           total_timesteps: int = 1_000_000,
           run_name: Optional[str] = None,
           render: bool = False,
@@ -336,7 +338,7 @@ def train(algo: str = "ppo",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train two RL policies head-to-head")
-    parser.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
+    parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--render", action="store_true")

@@ -2,14 +2,20 @@
 Main CLI entry point for HRI_RaceBot.
 
 Usage:
-    python main.py demo                            # random-action sanity demo
+    python main.py demo                              # random-action sanity demo
     python main.py debug [--opponent random|rl|human] [--opp-model PATH] [--algo sac|ppo]
-    python main.py train [--algo sac|ppo] --timesteps 1000000 [--name my_run]
+    python main.py train [--algo sac|ppo] [--timesteps 1000000] [--name my_run]
+                          [--headless] [--no-dashboard]
     python main.py race  --run runs/duo_sac_xxx [--algo sac|ppo] [--episodes 10] [--render]
 
 Default algo is SAC: off-policy + replay buffer is much more sample-efficient
 than PPO for continuous control with mixed-scale rewards on a single env.
 PPO is still available via `--algo ppo`.
+
+During training the PyBullet GUI is open by default (so you can watch the
+cars learn) and a matplotlib live dashboard subprocess plots episode reward,
+reward-component breakdown, race wins, etc. Pass `--headless` and/or
+`--no-dashboard` for unattended/server runs.
 """
 
 from __future__ import annotations
@@ -47,7 +53,6 @@ def _cmd_demo(args):
 def _cmd_debug(args):
     from debug import main as debug_main
     import sys
-    # Forward extra args to debug.main by mutating argv — simplest path.
     sys.argv = ["debug.py"]
     if args.opponent:
         sys.argv += ["--opponent", args.opponent]
@@ -63,7 +68,8 @@ def _cmd_debug(args):
 def _cmd_train(args):
     from train import train
     train(algo=args.algo, total_timesteps=args.timesteps,
-          run_name=args.name, render=args.render, seed=args.seed)
+          run_name=args.name, headless=args.headless,
+          dashboard=args.dashboard, seed=args.seed)
 
 
 def _cmd_race(args):
@@ -90,7 +96,12 @@ def main():
     p_tr.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     p_tr.add_argument("--timesteps", type=int, default=1_000_000)
     p_tr.add_argument("--name", type=str, default=None)
-    p_tr.add_argument("--render", action="store_true")
+    # GUI + dashboard are on by default — pass these to disable.
+    p_tr.add_argument("--headless", action="store_true",
+                       help="Disable PyBullet GUI (default: GUI is on)")
+    p_tr.add_argument("--no-dashboard", dest="dashboard",
+                       action="store_false", default=True,
+                       help="Disable the matplotlib live training dashboard")
     p_tr.add_argument("--seed", type=int, default=0)
     p_tr.set_defaults(func=_cmd_train)
 

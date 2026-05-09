@@ -43,6 +43,10 @@ python main.py train --timesteps 1000000
 # Same training, no GUI / no dashboard (server / unattended)
 python main.py train --timesteps 1000000 --headless --no-dashboard
 
+# Resume a paused / Ctrl+C'd run (model + VecNormalize + replay buffer all
+# restored from the run directory; loop counters picked up where you left off)
+python main.py train --resume runs/<run_name> --timesteps 1500000
+
 # Race the trained models
 python main.py race --run runs/<run_name> --episodes 10 --render
 ```
@@ -66,25 +70,26 @@ sim steps by `MetricsWriterCallback`), the SB3 monitor CSVs, and
 
 ## Observation, action, reward
 
-### Observation (per car, 15 floats)
+### Observation (per car, 14 floats)
 
-The track lies in the world XY plane, so `z` is dropped from every relative
-vector — only the car's own `z` position survives, useful for flip/spawn
-sanity checks. Vectors marked **CAR FRAME** are rotated by `-yaw` so
-forward/back/left/right line up with obs axes, which is much easier for
-the policy to interpret than world-aligned vectors.
+The track lies in the world XY plane, so `z` is dropped from every
+component (it's constant noise on a 2D track). Flip detection still uses
+the car's local up vector, independent of the obs. Vectors marked
+**CAR FRAME** are rotated by `-yaw` so forward/back/left/right line up
+with obs axes — way easier for the policy to interpret than world-aligned
+vectors.
 
 | Idx | Field | Frame |
 |---|---|---|
-| 0–2 | position (x, y, z) | world |
-| 3–4 | forward unit vector (xy) | world |
-| 5–6 | vector to closest centerline point (xy) | **car** |
-| 7 | steering angle | rad |
-| 8 | steering rate | rad/s |
-| 9 | rear-wheel angular velocity | rad/s |
-| 10 | yaw angular velocity | rad/s |
-| 11–12 | vector to other car (xy) | **car** |
-| 13–14 | velocity-difference vector (xy) | **car** |
+| 0–1 | position (x, y) | world |
+| 2–3 | forward unit vector (xy) | world |
+| 4–5 | vector to closest centerline point (xy) | **car** |
+| 6 | steering angle | rad |
+| 7 | steering rate | rad/s |
+| 8 | rear-wheel angular velocity | rad/s |
+| 9 | yaw angular velocity | rad/s |
+| 10–11 | vector to other car (xy) | **car** |
+| 12–13 | velocity-difference vector (xy) | **car** |
 
 ### Action (per car, 2 floats, both in [-1, 1])
 
@@ -98,14 +103,29 @@ and the env: `smoothed = α·new + (1−α)·prev` with `α = SIM_CONFIG["action
 (default 0.5). This stops the car from chattering on raw 30 Hz RL output
 without changing what the policy sees in its own rollouts.
 
+### Actor / critic architecture
+
+Single hidden layer each, asymmetric:
+
+| Net | Layers | Why |
+|---|---|---|
+| Actor (`pi`) | `14 → 64 → 2` | More capacity to map a 14-dim obs into a smooth 2-dim policy |
+| Critic (SAC `qf` / PPO `vf`) | `14 → 32 → 1` | Scalar output, simpler shape; fewer params reduces critic noise |
+
+Set in `config.py` via `policy_kwargs=dict(net_arch=dict(pi=[64], qf=[32]))`
+for SAC and `…dict(pi=[64], vf=[32])` for PPO. These are deliberately
+small; the obs is only 14 dims and the action only 2, so wider nets just
+slow training without buying capacity. Bump them if you start asking the
+policy to do more (camera/LiDAR obs, more cars, more complex tracks).
+
 ### Reward (weights in `config.REWARD_CONFIG`)
 
 Dense (per step):
-- `progress` — `+5.0 × Δ centerline arc-length` (the dominant signal)
+- `progress` — `+10.0 × Δ centerline arc-length` (the dominant signal — at ~4 m/s this is ~1.3/step, which is several × any single penalty so the policy reliably prefers driving forward)
 - `speed` — `+0.05 × forward speed (m/s)`
 - `upright` — `−2.0 × (roll² + pitch²)`
 - `relative` — `+0.1 × (own_lap_arc − opp_lap_arc)`
-- `centerline` — `−0.3 × |lateral|²` (continuous quadratic, no dead zone — gives the policy a smooth gradient toward the centerline so it actively steers away from the walls)
+- `centerline` — `−0.1 × |lateral|²` (continuous quadratic, no dead zone — soft gradient toward the centerline so the policy actively steers away from the walls; weight kept light enough that **progress dominates** during normal driving)
 - `wall_hit` — `−20.0` while in contact with any wall
 - `car_hit` — `−20.0` while in contact with the other car
 - `off_track` — `−5.0` while off the drivable ring
@@ -122,6 +142,37 @@ Sparse / terminal:
 - **Race won:** terminate everyone; loser gets the lose penalty.
 - **Truncation:** episode hits `max_episode_steps` (default 1500 ≈ 50 s).
 - **Stuck:** intentionally not terminated — the policy must learn to recover.
+
+## Pause & resume
+
+Hit `Ctrl+C` in the terminal at any point during training. The run snapshots
+**model + VecNormalize stats + replay buffer + loop counters** to the run
+directory and exits cleanly:
+
+```
+runs/<name>/
+   car_0_<algo>_latest.zip       car_1_<algo>_latest.zip
+   car_0_vecnormalize.pkl        car_1_vecnormalize.pkl
+   car_0_replay_buffer.pkl       car_1_replay_buffer.pkl   (SAC only)
+   learners_state.json           (timesteps, win streaks, paused, elapsed_total)
+   monitor_car_0.monitor.csv     metrics_car_0.json
+   monitor_car_1.monitor.csv     metrics_car_1.json
+   tb/                           config_snapshot.json
+```
+
+Resume with the same `runs/<name>` directory:
+
+```bash
+python main.py train --resume runs/<name> --timesteps 1500000
+```
+
+Resume re-loads each model + VecNormalize stats + replay buffer (so SAC's
+critic doesn't re-bootstrap from scratch) and continues from the saved
+`elapsed_total`. The dashboard subprocess restarts automatically and picks
+up the existing metrics JSONs / monitor CSVs.
+
+State is also auto-saved every chunk (replay buffer every 50k steps), so
+even a hard crash only loses one chunk worth of progress.
 
 ## Self-play training
 

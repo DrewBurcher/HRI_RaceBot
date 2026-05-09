@@ -69,7 +69,9 @@ def _cmd_train(args):
     from train import train
     train(algo=args.algo, total_timesteps=args.timesteps,
           run_name=args.name, headless=args.headless,
-          dashboard=args.dashboard, seed=args.seed)
+          dashboard=args.dashboard,
+          resume_from=getattr(args, "resume_from", None),
+          seed=args.seed)
 
 
 def _cmd_race(args):
@@ -96,6 +98,9 @@ def main():
     p_tr.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     p_tr.add_argument("--timesteps", type=int, default=1_000_000)
     p_tr.add_argument("--name", type=str, default=None)
+    p_tr.add_argument("--resume", dest="resume_from", type=str, default=None,
+                       help="Resume from runs/<name> — loads model, "
+                            "VecNormalize, replay buffer, win streaks, etc.")
     # GUI + dashboard are on by default — pass these to disable.
     p_tr.add_argument("--headless", action="store_true",
                        help="Disable PyBullet GUI (default: GUI is on)")

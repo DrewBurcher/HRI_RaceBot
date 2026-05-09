@@ -18,6 +18,9 @@ Design notes
   tensorboard via RewardComponentLogger. A second callback,
   MetricsWriterCallback, dumps per-episode JSON for the live_plot.py
   dashboard subprocess.
+* Ctrl+C / KeyboardInterrupt at any point pauses cleanly: model +
+  VecNormalize + replay buffer + loop counters are saved to the run
+  directory so `--resume runs/<name>` picks up exactly where it left off.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from stable_baselines3 import PPO, SAC
@@ -254,6 +257,121 @@ def _race_once(base_env: TwoCarRaceEnv, learners: List[LearnerState]
     return winner
 
 
+def _save_resume_state(log_dir: str,
+                        learners: List["LearnerState"],
+                        algo: str,
+                        elapsed_total: int,
+                        next_opp_refresh: int,
+                        save_replay_buffer: bool = True) -> None:
+    """Snapshot everything needed to resume a paused/interrupted run.
+
+    Per-learner artifacts (under `runs/<run>/`):
+        <car>_<algo>_latest.zip       SB3 model
+        <car>_vecnormalize.pkl        VecNormalize obs/reward stats
+        <car>_replay_buffer.pkl       SAC replay buffer (skipped for PPO)
+
+    Plus a single `learners_state.json` with the loop-level counters
+    (timesteps, win streak, paused, wins/races, elapsed_total,
+    next_opp_refresh) so resume picks up exactly where Ctrl+C hit.
+    """
+    for L in learners:
+        try:
+            L.model.save(os.path.join(log_dir, f"{L.agent_id}_{algo}_latest"))
+        except Exception as e:
+            print(f"[save] WARN: model save failed for {L.agent_id}: {e}")
+        try:
+            L.env.save(os.path.join(log_dir, f"{L.agent_id}_vecnormalize.pkl"))
+        except Exception as e:
+            print(f"[save] WARN: VecNormalize save failed for {L.agent_id}: {e}")
+        if save_replay_buffer and hasattr(L.model, "replay_buffer") \
+                and L.model.replay_buffer is not None:
+            try:
+                L.model.save_replay_buffer(
+                    os.path.join(log_dir, f"{L.agent_id}_replay_buffer"))
+            except Exception as e:
+                print(f"[save] WARN: replay buffer save failed for {L.agent_id}: {e}")
+
+    state = {
+        "algo": algo,
+        "elapsed_total": int(elapsed_total),
+        "next_opp_refresh": int(next_opp_refresh),
+        "learners": [
+            {"id": L.agent_id, "wins": L.wins,
+             "races_played": L.races_played, "win_streak": L.win_streak,
+             "paused": L.paused, "timesteps": L.timesteps}
+            for L in learners
+        ],
+    }
+    try:
+        with open(os.path.join(log_dir, "learners_state.json"), "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"[save] WARN: learners_state.json write failed: {e}")
+
+
+def _load_resume_state(log_dir: str, algo: str,
+                        base_env: TwoCarRaceEnv
+                        ) -> Tuple[List["LearnerState"], int, int]:
+    """Load everything _save_resume_state wrote and rebuild the learners.
+
+    Returns (learners, elapsed_total, next_opp_refresh).
+    """
+    state_path = os.path.join(log_dir, "learners_state.json")
+    with open(state_path, "r") as f:
+        state = json.load(f)
+
+    if state.get("algo") and state["algo"] != algo:
+        print(f"[resume] WARN: saved algo is {state['algo']!r} but --algo "
+              f"{algo!r} was requested. Using {algo!r}.")
+
+    AlgoCls = _make_algo_class(algo)
+    init_opp = RandomAgent(seed=0)   # placeholder; refreshed on first chunk
+    learners: List["LearnerState"] = []
+
+    for st in state["learners"]:
+        car_id = st["id"]
+        # Build a fresh wrapper around the current base_env, then load
+        # VecNormalize stats on top so reward/obs normalization picks up
+        # exactly where it left off.
+        env_l = _wrap_for_learner(base_env, car_id, init_opp,
+                                   log_dir, learner_tag=car_id)
+        vn_path = os.path.join(log_dir, f"{car_id}_vecnormalize.pkl")
+        if os.path.exists(vn_path):
+            try:
+                loaded_vn = VecNormalize.load(vn_path, env_l.venv)
+                # VecNormalize.load returns a fresh wrapper; copy stats over.
+                env_l.obs_rms = loaded_vn.obs_rms
+                env_l.ret_rms = loaded_vn.ret_rms
+            except Exception as e:
+                print(f"[resume] WARN: VecNormalize load failed for {car_id}: {e}")
+
+        model_path = os.path.join(log_dir, f"{car_id}_{algo}_latest.zip")
+        model = AlgoCls.load(model_path, env=env_l, device="cpu")
+
+        buf_path = os.path.join(log_dir, f"{car_id}_replay_buffer.pkl")
+        if hasattr(model, "load_replay_buffer") and os.path.exists(buf_path):
+            try:
+                model.load_replay_buffer(buf_path)
+            except Exception as e:
+                print(f"[resume] WARN: replay buffer load failed for "
+                      f"{car_id}: {e}")
+
+        L = LearnerState(
+            agent_id=car_id, algo=algo, model=model, env=env_l,
+            timesteps=int(st["timesteps"]),
+            win_streak=int(st["win_streak"]),
+            paused=bool(st["paused"]),
+            wins=int(st["wins"]),
+            races_played=int(st["races_played"]),
+        )
+        learners.append(L)
+        print(f"[resume] loaded {car_id}: {L.timesteps:,} steps, "
+              f"streak={L.win_streak}, paused={L.paused}")
+
+    return (learners, int(state.get("elapsed_total", 0)),
+            int(state.get("next_opp_refresh", OPP_REFRESH_STEPS)))
+
+
 def _refresh_opponents(base_env: TwoCarRaceEnv,
                        learners: List[LearnerState],
                        log_dir: str) -> None:
@@ -302,6 +420,7 @@ def train(algo: str = "sac",
           run_name: Optional[str] = None,
           headless: bool = False,
           dashboard: bool = True,
+          resume_from: Optional[str] = None,
           seed: int = 0) -> str:
     """Self-play training loop.
 
@@ -311,34 +430,59 @@ def train(algo: str = "sac",
     dashboard=True (default) spawns live_plot.py as a subprocess that reads
     the per-learner metrics JSONs and tails the SB3 monitor CSVs into a
     matplotlib window. Pass dashboard=False to skip it.
+
+    resume_from=<run_dir> picks up where a paused/interrupted run left off:
+    loads each learner's model + VecNormalize stats + replay buffer (SAC),
+    plus the loop counters (elapsed_total, next_opp_refresh, per-learner
+    timesteps/streak/paused). Pass `--resume runs/<name>` from the CLI.
+
+    Ctrl+C at any point during training saves all of the above (so the run
+    is always resumable) and exits cleanly.
     """
-    if run_name is None:
-        run_name = f"duo_{algo}_{int(time.time())}"
-    log_dir = os.path.join("runs", run_name)
-    os.makedirs(log_dir, exist_ok=True)
-    print(f"[train] log dir = {log_dir}")
+    is_resume = resume_from is not None
+    if is_resume:
+        log_dir = resume_from
+        if not os.path.isdir(log_dir):
+            raise SystemExit(f"--resume directory does not exist: {log_dir}")
+        run_name = os.path.basename(log_dir.rstrip("/\\"))
+        print(f"[train] RESUMING from {log_dir}")
+    else:
+        if run_name is None:
+            run_name = f"duo_{algo}_{int(time.time())}"
+        log_dir = os.path.join("runs", run_name)
+        os.makedirs(log_dir, exist_ok=True)
+        print(f"[train] log dir = {log_dir}")
 
     render = not headless
     base_env = TwoCarRaceEnv(render_mode="human" if render else None,
                               seed=seed)
 
-    opp_seed = seed + 1
-    init_opp = RandomAgent(seed=opp_seed)
+    if is_resume:
+        # Need at least one reset so base_env.agent_ids and the cars exist
+        # before we rebuild VecNormalize wrappers.
+        base_env.reset()
+        learners, elapsed_total, next_opp_refresh = _load_resume_state(
+            log_dir, algo, base_env)
+    else:
+        opp_seed = seed + 1
+        init_opp = RandomAgent(seed=opp_seed)
 
-    learners: List[LearnerState] = []
-    for car_id in base_env.agent_ids:
-        env_l = _wrap_for_learner(base_env, car_id, init_opp,
-                                   log_dir, learner_tag=car_id)
-        model = _make_model(algo, env_l, log_dir)
-        learners.append(LearnerState(agent_id=car_id, algo=algo,
-                                      model=model, env=env_l))
+        learners: List[LearnerState] = []
+        for car_id in base_env.agent_ids:
+            env_l = _wrap_for_learner(base_env, car_id, init_opp,
+                                       log_dir, learner_tag=car_id)
+            model = _make_model(algo, env_l, log_dir)
+            learners.append(LearnerState(agent_id=car_id, algo=algo,
+                                          model=model, env=env_l))
+        elapsed_total = 0
+        next_opp_refresh = OPP_REFRESH_STEPS
 
     win_streak_cap = RACE_CONFIG["win_streak_pause"]
-    elapsed_total = 0
-    next_opp_refresh = OPP_REFRESH_STEPS
 
-    print(f"[train] starting head-to-head training of {len(learners)} cars "
-          f"({algo.upper()}) for {total_timesteps:,} steps each")
+    print(f"[train] {'continuing' if is_resume else 'starting'} head-to-head "
+          f"training of {len(learners)} cars ({algo.upper()}) "
+          f"target {total_timesteps:,} steps each "
+          f"(elapsed: {elapsed_total:,})")
 
     callbacks = {
         L.agent_id: CallbackList([
@@ -360,72 +504,92 @@ def train(algo: str = "sac",
         except Exception as e:
             print(f"[train] WARN: could not launch dashboard: {e}")
 
-    while elapsed_total < total_timesteps:
-        for L in learners:
-            if L.paused:
-                print(f"[train] {L.agent_id} PAUSED (win streak = {L.win_streak})")
-                continue
-            print(f"[train] {L.agent_id}: learning {CHUNK_TIMESTEPS:,} steps")
-            L.model.learn(total_timesteps=CHUNK_TIMESTEPS,
-                           reset_num_timesteps=False, progress_bar=False,
-                           callback=callbacks[L.agent_id],
-                           tb_log_name=L.agent_id)
-            L.timesteps += CHUNK_TIMESTEPS
-
-        elapsed_total += CHUNK_TIMESTEPS
-
-        if elapsed_total >= next_opp_refresh:
-            print("[train] refreshing self-play opponents")
-            _refresh_opponents(base_env, learners, log_dir)
-            next_opp_refresh += OPP_REFRESH_STEPS
-
-        wins_this_block: Dict[str, int] = {L.agent_id: 0 for L in learners}
-        for _ in range(EVAL_RACES_PER_CHUNK):
-            w = _race_once(base_env, learners)
-            if w is None:
-                continue
-            wins_this_block[w] += 1
+    interrupted = False
+    try:
+        while elapsed_total < total_timesteps:
             for L in learners:
-                L.races_played += 1
-                if L.agent_id == w:
-                    L.wins += 1
-                    L.win_streak += 1
-                else:
-                    L.win_streak = 0
+                if L.paused:
+                    print(f"[train] {L.agent_id} PAUSED (win streak = {L.win_streak})")
+                    continue
+                print(f"[train] {L.agent_id}: learning {CHUNK_TIMESTEPS:,} steps")
+                L.model.learn(total_timesteps=CHUNK_TIMESTEPS,
+                               reset_num_timesteps=False, progress_bar=False,
+                               callback=callbacks[L.agent_id],
+                               tb_log_name=L.agent_id)
+                L.timesteps += CHUNK_TIMESTEPS
 
+            elapsed_total += CHUNK_TIMESTEPS
+
+            if elapsed_total >= next_opp_refresh:
+                print("[train] refreshing self-play opponents")
+                _refresh_opponents(base_env, learners, log_dir)
+                next_opp_refresh += OPP_REFRESH_STEPS
+
+            wins_this_block: Dict[str, int] = {L.agent_id: 0 for L in learners}
+            for _ in range(EVAL_RACES_PER_CHUNK):
+                w = _race_once(base_env, learners)
+                if w is None:
+                    continue
+                wins_this_block[w] += 1
+                for L in learners:
+                    L.races_played += 1
+                    if L.agent_id == w:
+                        L.wins += 1
+                        L.win_streak += 1
+                    else:
+                        L.win_streak = 0
+
+            for L in learners:
+                previously_paused = L.paused
+                L.paused = L.win_streak >= win_streak_cap
+                if L.paused and not previously_paused:
+                    print(f"[train] >>> {L.agent_id} PAUSED — won {L.win_streak} "
+                          f"races in a row")
+                if not L.paused and previously_paused:
+                    print(f"[train] >>> {L.agent_id} resumed training")
+
+            snapshot = {
+                "elapsed_total": elapsed_total,
+                "wins_this_block": wins_this_block,
+                "learners": [
+                    {"id": L.agent_id, "wins": L.wins,
+                     "races": L.races_played, "streak": L.win_streak,
+                     "paused": L.paused, "timesteps": L.timesteps}
+                    for L in learners
+                ],
+            }
+            for L in learners:
+                L.history.append(snapshot)
+            with open(os.path.join(log_dir, "history.json"), "w") as f:
+                json.dump([L.history[-1] for L in learners], f, indent=2)
+            print(f"[train] block summary: {wins_this_block}")
+
+            # Snapshot resume state every chunk. Replay buffer is heavy
+            # (~25 MB at 500k transitions) so persist it on opponent-refresh
+            # boundaries and at exit, not every chunk.
+            save_buf = (elapsed_total % OPP_REFRESH_STEPS == 0)
+            _save_resume_state(log_dir, learners, algo,
+                                elapsed_total, next_opp_refresh,
+                                save_replay_buffer=save_buf)
+    except KeyboardInterrupt:
+        print("\n[train] Ctrl+C — pausing run; saving model + replay buffer "
+              "+ VecNormalize so you can resume with --resume.")
+        interrupted = True
+
+    # Final save: model + VecNormalize + replay buffer + learner state.
+    # On a clean completion this overwrites the latest checkpoint with the
+    # post-final-chunk weights; on Ctrl+C this is the saved-for-resume copy.
+    _save_resume_state(log_dir, learners, algo,
+                        elapsed_total, next_opp_refresh,
+                        save_replay_buffer=True)
+
+    # Also save under the canonical "*_final" name (used by evaluate.py),
+    # but only on clean completion — an interrupted run isn't really "final".
+    if not interrupted:
         for L in learners:
-            previously_paused = L.paused
-            L.paused = L.win_streak >= win_streak_cap
-            if L.paused and not previously_paused:
-                print(f"[train] >>> {L.agent_id} PAUSED — won {L.win_streak} "
-                      f"races in a row")
-            if not L.paused and previously_paused:
-                print(f"[train] >>> {L.agent_id} resumed training")
-
-        snapshot = {
-            "elapsed_total": elapsed_total,
-            "wins_this_block": wins_this_block,
-            "learners": [
-                {"id": L.agent_id, "wins": L.wins,
-                 "races": L.races_played, "streak": L.win_streak,
-                 "paused": L.paused, "timesteps": L.timesteps}
-                for L in learners
-            ],
-        }
-        for L in learners:
-            L.history.append(snapshot)
-        with open(os.path.join(log_dir, "history.json"), "w") as f:
-            json.dump([L.history[-1] for L in learners], f, indent=2)
-        print(f"[train] block summary: {wins_this_block}")
-
-    for L in learners:
-        save_path = os.path.join(log_dir, f"{L.agent_id}_{algo}_final")
-        L.model.save(save_path)
-        try:
-            L.env.save(os.path.join(log_dir, f"{L.agent_id}_vecnormalize.pkl"))
-        except Exception as e:
-            print(f"[train] WARN: could not save VecNormalize for {L.agent_id}: {e}")
-        print(f"[train] saved {save_path}.zip")
+            save_path = os.path.join(log_dir, f"{L.agent_id}_{algo}_final")
+            L.model.save(save_path)
+            print(f"[train] saved {save_path}.zip")
 
     with open(os.path.join(log_dir, "config_snapshot.json"), "w") as f:
         json.dump({
@@ -438,6 +602,8 @@ def train(algo: str = "sac",
             "chunk_timesteps": CHUNK_TIMESTEPS,
             "opp_refresh_steps": OPP_REFRESH_STEPS,
             "eval_races_per_chunk": EVAL_RACES_PER_CHUNK,
+            "interrupted": interrupted,
+            "elapsed_total": elapsed_total,
         }, f, indent=2)
 
     base_env.close()
@@ -446,6 +612,10 @@ def train(algo: str = "sac",
             plot_proc.terminate()
         except Exception:
             pass
+
+    if interrupted:
+        print(f"[train] run paused. Resume with: "
+              f"python main.py train --resume {log_dir}")
     return log_dir
 
 
@@ -454,6 +624,9 @@ if __name__ == "__main__":
     parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--name", type=str, default=None)
+    parser.add_argument("--resume", dest="resume_from", type=str, default=None,
+                        help="Resume from runs/<name>; restores model, "
+                             "VecNormalize, replay buffer, and loop counters")
     parser.add_argument("--headless", action="store_true",
                         help="Disable PyBullet GUI (default: GUI is on so you "
                              "can watch the cars race during training)")
@@ -464,4 +637,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     train(algo=args.algo, total_timesteps=args.timesteps,
           run_name=args.name, headless=args.headless,
-          dashboard=args.dashboard, seed=args.seed)
+          dashboard=args.dashboard, resume_from=args.resume_from,
+          seed=args.seed)

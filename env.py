@@ -10,16 +10,16 @@ The env is intentionally agnostic about *who* is driving — the agent classes
 in `agents/` plug in cleanly. That makes it easy to mix RL policies, scripted
 opponents, and human drivers (debug mode) without changing this file.
 
-Observation (per car, 15 dims, dtype float32):
-   [0:3]   position (world frame, x y z)
-   [3:5]   forward unit vector (world frame, xy) — heading, no z (2D track)
-   [5:7]   vector to closest centerline point  (CAR FRAME, xy)
-   [7]     steering angle (rad)
-   [8]     steering rate  (rad/s)
-   [9]     rear-wheel angular velocity (rad/s)
-   [10]    yaw angular velocity (rad/s) — how fast the car is rotating
-   [11:13] vector to other car          (CAR FRAME, xy)
-   [13:15] velocity-difference vector   (CAR FRAME, xy, opp_vel - own_vel)
+Observation (per car, 14 dims, dtype float32):
+   [0:2]   position (world frame, x y) — z dropped (2D track)
+   [2:4]   forward unit vector (world frame, xy) — heading
+   [4:6]   vector to closest centerline point  (CAR FRAME, xy)
+   [6]     steering angle (rad)
+   [7]     steering rate  (rad/s)
+   [8]     rear-wheel angular velocity (rad/s)
+   [9]     yaw angular velocity (rad/s) — how fast the car is rotating
+   [10:12] vector to other car          (CAR FRAME, xy)
+   [12:14] velocity-difference vector   (CAR FRAME, xy, opp_vel - own_vel)
 
 Action (per car, 2 dims):
    [0]  steering target,         scaled by max_steer
@@ -95,8 +95,8 @@ class TwoCarRaceEnv(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                         shape=(2,), dtype=np.float32)
-        # See module docstring for the 15-dim observation layout.
-        obs_dim = 3 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 2
+        # See module docstring for the 14-dim observation layout (z dropped).
+        obs_dim = 2 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
                                              shape=(obs_dim,), dtype=np.float32)
 
@@ -263,9 +263,10 @@ class TwoCarRaceEnv(gym.Env):
         car = self.cars[agent_id]
         yaw = float(eul[2])
 
-        # 1. Position (world frame, xyz). z is kept because flip-detection
-        #    and the spawn baseline use it; only relative *vector* obs lose z.
-        pos_w = pos.astype(np.float32)
+        # 1. Position (world frame, XY only). z is constant on a 2D track and
+        #    only adds noise to the policy. Flip detection still uses the
+        #    car's local up vector via car.up_z(), independent of obs.
+        pos_xy = np.array([pos[0], pos[1]], dtype=np.float32)
 
         # 2. Forward unit vector (world frame, xy only).
         fwd_w = car.forward_unit_vector()
@@ -294,15 +295,15 @@ class TwoCarRaceEnv(gym.Env):
             yaw, float(dvel[0]), float(dvel[1]))
 
         return np.array([
-            pos_w[0], pos_w[1], pos_w[2],          # [0:3]
-            fwd_xy[0], fwd_xy[1],                  # [3:5]
-            cx_local, cy_local,                    # [5:7]
-            steer_angle,                           # [7]
-            steer_rate,                            # [8]
-            rear_wvel,                             # [9]
-            yaw_rate,                              # [10]
-            ox_local, oy_local,                    # [11:13]
-            dvx_local, dvy_local,                  # [13:15]
+            pos_xy[0], pos_xy[1],                  # [0:2]
+            fwd_xy[0], fwd_xy[1],                  # [2:4]
+            cx_local, cy_local,                    # [4:6]
+            steer_angle,                           # [6]
+            steer_rate,                            # [7]
+            rear_wvel,                             # [8]
+            yaw_rate,                              # [9]
+            ox_local, oy_local,                    # [10:12]
+            dvx_local, dvy_local,                  # [12:14]
         ], dtype=np.float32)
 
     def _signed_lateral(self, x: float, y: float) -> float:
@@ -315,7 +316,7 @@ class TwoCarRaceEnv(gym.Env):
         d = float(np.hypot(x - cx, y))
         return d - r
 
-    # ── Domain randomization ─────────────────────────────────────────────────
+    # ── Domain randomization ──────────────────────────────────────────────────
     def _sample_dr_params(self) -> Dict[str, float]:
         """Sample per-episode DR values from N(default, std_pct·|default|),
         clamped to [clip_lo, clip_hi]·default. Returns {} if DR disabled.

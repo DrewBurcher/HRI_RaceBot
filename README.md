@@ -19,7 +19,8 @@ is modified.
 | `racecar.py` | Wrapper around the default PyBullet `racecar/racecar.urdf`. Drive wheels under custom **PD-on-velocity** with **asymmetric torque clamp** (≈2× braking). Steering under POSITION_CONTROL. |
 | `env.py` | Gymnasium two-car race env (multi-agent dict API) + `SingleAgentRaceWrapper` so SB3 sees a single-agent gym env per learner. Domain randomization, low-pass action filter, collision/flip detection, shaped rewards all live here. |
 | `agents/` | Pluggable agent registry. `BaseAgent`, `RandomAgent`, `RLAgent` / `FrozenRLAgent`, `HumanKeyboardAgent`. Drop in MPC, scripted, etc. without touching the env. |
-| `train.py` | Self-play loop: one SB3 model per car, opponent snapshots refresh every 50k steps, races between chunks tally wins, **3-in-a-row pauses** the leader. Per-learner `VecNormalize`. Tensorboard scalars for reward components and DR samples. |
+| `train.py` | Self-play loop: one SB3 model per car, opponent snapshots refresh every 50k steps, races between chunks tally wins, **3-in-a-row pauses** the leader. Per-learner `VecNormalize`. Tensorboard scalars for reward components and DR samples. Spawns `live_plot.py` as a subprocess. |
+| `live_plot.py` | matplotlib live training dashboard — per-learner episode reward, reward-component breakdown, episode length, cumulative race tally, current win streak, run info. Tails `metrics_<car>.json`, monitor CSVs, and `history.json`. |
 | `debug.py` | Drive a car yourself with WASD. PyBullet sliders for Drive Torque, Brake Torque, Traction. |
 | `evaluate.py` | Head-to-head race tournament between two trained models. |
 | `main.py` | CLI dispatcher (`demo` / `debug` / `train` / `race`). |
@@ -35,8 +36,12 @@ python main.py demo
 # Drive a car yourself (WASD; click the PyBullet window for keyboard focus)
 python main.py debug
 
-# Train two SAC policies head-to-head (SAC is the default; --algo ppo also works)
+# Train two SAC policies head-to-head — opens the PyBullet viewer (so you
+# can watch the cars learn) AND a matplotlib dashboard subprocess
 python main.py train --timesteps 1000000
+
+# Same training, no GUI / no dashboard (server / unattended)
+python main.py train --timesteps 1000000 --headless --no-dashboard
 
 # Race the trained models
 python main.py race --run runs/<run_name> --episodes 10 --render
@@ -46,6 +51,18 @@ python main.py race --run runs/<run_name> --episodes 10 --render
 sample-efficient than PPO for continuous control on a single env, and it
 handles the mixed-scale dense + sparse rewards better in practice. PPO is
 still wired up — pass `--algo ppo` to either subcommand.
+
+**Live training UX.** During `python main.py train`, two windows open by
+default:
+1. The **PyBullet viewer** showing both cars racing in real time as the
+   policies learn. Pass `--headless` to skip it (faster training).
+2. A **matplotlib dashboard** (`live_plot.py`) tailing per-learner episode
+   reward, reward-component breakdown, episode length, cumulative race
+   tally, and current win streak. Pass `--no-dashboard` to skip it.
+
+The dashboard reads `runs/<run>/metrics_<car_id>.json` (written ~every 200
+sim steps by `MetricsWriterCallback`), the SB3 monitor CSVs, and
+`history.json` for race results.
 
 ## Observation, action, reward
 
@@ -88,7 +105,7 @@ Dense (per step):
 - `speed` — `+0.05 × forward speed (m/s)`
 - `upright` — `−2.0 × (roll² + pitch²)`
 - `relative` — `+0.1 × (own_lap_arc − opp_lap_arc)`
-- `centerline` — `−1.0 × max(0, |lateral| − 1.5)²` (1.5 m dead zone matches the racing lanes)
+- `centerline` — `−0.3 × |lateral|²` (continuous quadratic, no dead zone — gives the policy a smooth gradient toward the centerline so it actively steers away from the walls)
 - `wall_hit` — `−20.0` while in contact with any wall
 - `car_hit` — `−20.0` while in contact with the other car
 - `off_track` — `−5.0` while off the drivable ring

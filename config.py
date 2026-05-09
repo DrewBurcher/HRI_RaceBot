@@ -71,9 +71,12 @@ REWARD_CONFIG = {
     "speed_reward":              0.05,   # × forward speed (m/s)
     "upright_reward":           -2.0,    # × (roll² + pitch²) — discourage tilting
     "relative_progress_reward":  0.1,    # × (own_lap_arc - opp_lap_arc)
-    "centerline_penalty":       -1.0,    # × max(0, |lateral|-dead_zone)² (m²)
-    "centerline_dead_zone":      1.5,    # m of grace; matches lane_offset so
-                                          # the racing lanes don't get penalized
+    "centerline_penalty":       -0.3,    # × |lateral|² (m²) — continuous gradient
+                                          # toward centerline; helps the policy
+                                          # avoid the walls. NO dead zone — the
+                                          # walls already hard-clip extremes; what
+                                          # matters here is a smooth signal.
+    "centerline_dead_zone":      0.0,    # disabled (kept for future tuning)
     # Per-step penalties:
     "wall_collision_penalty":   -20.0,   # while in contact with any wall body
     "car_collision_penalty":    -20.0,   # while in contact with the other car

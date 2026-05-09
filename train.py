@@ -1,9 +1,6 @@
 """
 Train two RL policies head-to-head on `TwoCarRaceEnv`.
 
-Default algorithm is SAC (off-policy, replay buffer, sample-efficient on
-continuous control). PPO is still wired up via `--algo ppo`.
-
 Design notes
 ------------
 * One stable-baselines3 model per car. Each is wrapped around the same
@@ -18,8 +15,9 @@ Design notes
 * Each training chunk runs N timesteps for the active learner(s); race results
   are tallied between chunks.
 * Reward components AND domain-randomization parameters are logged to
-  tensorboard via RewardComponentLogger so you can see which reward terms
-  dominate and verify the DR distribution is well behaved.
+  tensorboard via RewardComponentLogger. A second callback,
+  MetricsWriterCallback, dumps per-episode JSON for the live_plot.py
+  dashboard subprocess.
 """
 
 from __future__ import annotations
@@ -27,13 +25,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -50,11 +50,9 @@ EVAL_RACES_PER_CHUNK = 5          # races used to count wins between chunks
 
 class RewardComponentLogger(BaseCallback):
     """Aggregates per-step reward components into running means and dumps them
-    to tensorboard at every algorithm log interval.
-
-    Also tracks per-episode domain-randomization samples (one new sample
-    per reset, deduplicated by signature) and dumps their running means
-    under the `dr/*` namespace.
+    to tensorboard at every algorithm log interval. Also tracks per-episode
+    domain-randomization samples (one new sample per reset, deduplicated by
+    signature) and dumps their running means under the `dr/*` namespace.
     """
 
     def __init__(self, learner_id: str, verbose: int = 0):
@@ -112,6 +110,87 @@ class RewardComponentLogger(BaseCallback):
         self._count = 0
         self._dr_sums.clear()
         self._dr_count = 0
+
+
+class MetricsWriterCallback(BaseCallback):
+    """Per-step + per-episode JSON dump for the live dashboard.
+
+    Writes `runs/<run>/metrics_<learner_id>.json` containing:
+        reward_components: per-episode mean of every reward term
+        losses:            actor/critic/value/policy_grad/ent_coef snapshots
+        dr:                per-episode DR samples (deduplicated by signature)
+
+    The live_plot.py dashboard reads these files at ~1 Hz; missing keys are
+    handled gracefully there, so adding a new reward term is automatic.
+    """
+
+    def __init__(self, learner_id: str, log_dir: str, save_freq: int = 200,
+                 verbose: int = 0):
+        super().__init__(verbose)
+        self.learner_id = learner_id
+        self.metrics_path = os.path.join(log_dir, f"metrics_{learner_id}.json")
+        self.save_freq = save_freq
+        self._comps: Dict[str, float] = {}
+        self._steps_in_ep: int = 0
+        self._episode_count: int = 0
+        self._data: Dict[str, list] = {
+            "reward_components": [],
+            "losses": [],
+            "dr": [],
+        }
+        self._last_dr_sig: tuple = ()
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", [{}]):
+            comp = info.get("reward_components") or {}
+            for k, v in comp.items():
+                self._comps[k] = self._comps.get(k, 0.0) + float(v)
+            self._steps_in_ep += 1
+
+            if "episode" in info:
+                steps = max(self._steps_in_ep, 1)
+                entry = {
+                    "episode": self._episode_count,
+                    "timestep": int(self.num_timesteps),
+                    "ep_reward": float(info["episode"]["r"]),
+                    "ep_length": int(info["episode"]["l"]),
+                    "is_winner": bool(info.get("is_winner", False)),
+                    "flipped": bool(info.get("flipped", False)),
+                }
+                for k, v in self._comps.items():
+                    entry[k] = round(v / steps, 4)   # per-step mean
+                self._data["reward_components"].append(entry)
+                self._comps = {}
+                self._steps_in_ep = 0
+                self._episode_count += 1
+
+            dr = info.get("dr_params") or {}
+            sig = tuple(sorted(dr.items()))
+            if dr and sig != self._last_dr_sig:
+                self._last_dr_sig = sig
+                self._data["dr"].append(
+                    {"timestep": int(self.num_timesteps), **dr})
+
+        if self.num_timesteps % self.save_freq == 0:
+            loss_entry = {"timestep": int(self.num_timesteps)}
+            try:
+                logger = self.model.logger.name_to_value
+                for key in ["train/actor_loss", "train/critic_loss",
+                             "train/ent_coef_loss", "train/ent_coef",
+                             "train/policy_gradient_loss",
+                             "train/value_loss", "train/entropy_loss"]:
+                    if key in logger:
+                        loss_entry[key.split("/")[1]] = round(float(logger[key]), 6)
+            except Exception:
+                pass
+            if len(loss_entry) > 1:
+                self._data["losses"].append(loss_entry)
+            try:
+                with open(self.metrics_path, "w") as f:
+                    json.dump(self._data, f)
+            except Exception:
+                pass
+        return True
 
 
 def _make_vec_env(base_env: TwoCarRaceEnv, learner_id: str, opponent,
@@ -221,14 +300,25 @@ def _refresh_opponents(base_env: TwoCarRaceEnv,
 def train(algo: str = "sac",
           total_timesteps: int = 1_000_000,
           run_name: Optional[str] = None,
-          render: bool = False,
+          headless: bool = False,
+          dashboard: bool = True,
           seed: int = 0) -> str:
+    """Self-play training loop.
+
+    headless=False (default) opens the PyBullet GUI so you can watch both
+    cars race during training. headless=True is for unattended/server runs.
+
+    dashboard=True (default) spawns live_plot.py as a subprocess that reads
+    the per-learner metrics JSONs and tails the SB3 monitor CSVs into a
+    matplotlib window. Pass dashboard=False to skip it.
+    """
     if run_name is None:
         run_name = f"duo_{algo}_{int(time.time())}"
     log_dir = os.path.join("runs", run_name)
     os.makedirs(log_dir, exist_ok=True)
     print(f"[train] log dir = {log_dir}")
 
+    render = not headless
     base_env = TwoCarRaceEnv(render_mode="human" if render else None,
                               seed=seed)
 
@@ -250,7 +340,25 @@ def train(algo: str = "sac",
     print(f"[train] starting head-to-head training of {len(learners)} cars "
           f"({algo.upper()}) for {total_timesteps:,} steps each")
 
-    tb_callbacks = {L.agent_id: RewardComponentLogger(L.agent_id) for L in learners}
+    callbacks = {
+        L.agent_id: CallbackList([
+            RewardComponentLogger(L.agent_id),
+            MetricsWriterCallback(L.agent_id, log_dir),
+        ])
+        for L in learners
+    }
+
+    # ── Live dashboard subprocess ───────────────────────────────────────────
+    plot_proc: Optional[subprocess.Popen] = None
+    if dashboard:
+        try:
+            plot_proc = subprocess.Popen(
+                [sys.executable, "live_plot.py", "--run", log_dir],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            print(f"[train] dashboard launched (pid={plot_proc.pid})")
+        except Exception as e:
+            print(f"[train] WARN: could not launch dashboard: {e}")
 
     while elapsed_total < total_timesteps:
         for L in learners:
@@ -260,7 +368,7 @@ def train(algo: str = "sac",
             print(f"[train] {L.agent_id}: learning {CHUNK_TIMESTEPS:,} steps")
             L.model.learn(total_timesteps=CHUNK_TIMESTEPS,
                            reset_num_timesteps=False, progress_bar=False,
-                           callback=tb_callbacks[L.agent_id],
+                           callback=callbacks[L.agent_id],
                            tb_log_name=L.agent_id)
             L.timesteps += CHUNK_TIMESTEPS
 
@@ -333,6 +441,11 @@ def train(algo: str = "sac",
         }, f, indent=2)
 
     base_env.close()
+    if plot_proc is not None:
+        try:
+            plot_proc.terminate()
+        except Exception:
+            pass
     return log_dir
 
 
@@ -341,8 +454,14 @@ if __name__ == "__main__":
     parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--headless", action="store_true",
+                        help="Disable PyBullet GUI (default: GUI is on so you "
+                             "can watch the cars race during training)")
+    parser.add_argument("--no-dashboard", dest="dashboard",
+                        action="store_false", default=True,
+                        help="Disable the matplotlib live training dashboard")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     train(algo=args.algo, total_timesteps=args.timesteps,
-          run_name=args.name, render=args.render, seed=args.seed)
+          run_name=args.name, headless=args.headless,
+          dashboard=args.dashboard, seed=args.seed)

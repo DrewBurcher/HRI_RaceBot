@@ -43,7 +43,7 @@ class TwoCarRaceEnv(gym.Env):
                                  else RACE_CONFIG["alternate_lanes"])
 
         self.client: Optional[int] = None
-        self.track: Optional[OvalTrack] = None
+        self.track = None
         self.cars: Dict[str, RaceCar] = {}
 
         self._race_index = 0
@@ -76,7 +76,7 @@ class TwoCarRaceEnv(gym.Env):
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0,
                                         physicsClientId=self.client)
             p.resetDebugVisualizerCamera(
-                cameraDistance=25.0, cameraYaw=0.0, cameraPitch=-65.0,
+                cameraDistance=60.0, cameraYaw=0.0, cameraPitch=-65.0,
                 cameraTargetPosition=[0, 0, 0],
                 physicsClientId=self.client)
         else:

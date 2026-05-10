@@ -2,7 +2,9 @@
 Central configuration for HRI_RaceBot.
 """
 
-# ── Simulation ─────────────────────────────────────────────────────────────
+import math
+
+# ── Simulation ─────────────────────────────────────────────
 SIM_CONFIG = {
     "control_freq": 240,           
     "policy_freq": 30,             
@@ -11,52 +13,67 @@ SIM_CONFIG = {
     "action_lp_alpha": 0.5,
 }
 
-# ── Track geometry ───────────────────────────────────────────────────────
+# ── Track geometry ───────────────────────────────────────────────────
 TRACK_CONFIG = {
-    # ── Shape selector ──────────────────────────────────────────────────
+    # ── Shape selector ───────────────────────────────────────────
     # "oval"  → procedural stadium oval (no STL needed)
-    # "mesh"  → load your SolidWorks STL (fill in the mesh section below)
-    "shape": "oval",
+    # "mesh"  → load Track.STL (Dom's custom SolidWorks design)
+    "shape": "mesh",
 
     # ── Oval track parameters (used when shape="oval") ──────────────────
     "straight_length": 30.0,
     "curve_radius": 12.0,
-    "track_width": 3.0,
+    # NB: "track_width", "lane_offset", "start_jitter", "checkpoint_count"
+    # below are shared between oval and mesh modes.
     "wall_height": 0.6,
     "wall_thickness": 0.3,
     "num_curve_segments": 24,
-    "lane_offset": 0.75,
-    "start_jitter": 8.0,
+
+    # ── Shared params (used by both modes) ──────────────────────────
+    "track_width": 2.0,        # drivable channel width (m); STL scaled to match
+    "lane_offset": 0.5,        # ≈ track_width / 4
+    "start_jitter": 2.0,
     "checkpoint_count": 16,
 
     # ── Mesh track parameters (used when shape="mesh") ──────────────────
-    # Step 1: export your SolidWorks part as STL (File → Save As → .stl)
-    # Step 2: set stl_path to the path of that file (relative or absolute)
-    # Step 3: set mesh_scale — SolidWorks defaults to mm, PyBullet uses m
-    #         so [0.001, 0.001, 0.001] converts mm → m
-    # Step 4: fill in waypoints — a list of [x, y] points (in meters) that
-    #         trace the track centerline counterclockwise as a closed loop.
-    #         The first waypoint is the spawn/start position.
-    #         Tip: measure key points from your SolidWorks model and convert
-    #         to meters using the same scale as mesh_scale.
-    # Step 5: set track_width to the drivable width of your track (meters)
-    "stl_path": "track.stl",
-    "mesh_scale": [0.001, 0.001, 0.001],   # mm → m (SolidWorks default)
+    # Track.STL was modelled in SolidWorks in the XZ plane (extruded thinly
+    # along +Y). PyBullet uses Z-up with the ground on the XY plane, so we:
+    #   1. mesh_scale       — uniform 3.578× to make the ~0.559-unit drivable
+    #                          channel come out to ~2 m in PyBullet
+    #   2. mesh_rotation    — rotate +90° around X so SolidWorks XZ → PyBullet XY
+    #                          (SW Y "up" → PyBullet Z "up")
+    #   3. base_position    — translate so the track is centred on (0, 0)
+    # The waypoints below are the extracted centreline AFTER scale + rotation
+    # + centring, i.e. already in PyBullet world XY (meters).
+    "stl_path": "Track.STL",
+    "mesh_scale": [3.578, 3.578, 3.578],
+    "mesh_rotation_euler": [math.pi / 2, 0.0, 0.0],
+    "base_position": [-49.430, -16.638, 0.0],
     "waypoints": [
-        # [x, y] centerline points in meters — fill these in!
-        # Example for a simple oval matching the default track:
-        # [-15.0,  12.0], [0.0,  12.0], [15.0,  12.0],
-        # [22.4,   8.5],  [24.0, 0.0],  [22.4,  -8.5],
-        # [15.0, -12.0],  [0.0, -12.0], [-15.0, -12.0],
-        # [-22.4,  -8.5], [-24.0, 0.0], [-22.4,  8.5],
+        [-35.795,  14.584],
+        [-36.112,  18.965],
+        [-27.290,  18.343],
+        [ -6.151,  22.506],
+        [ -4.285,  22.523],
+        [  0.207,  15.922],
+        [  2.720,  13.219],
+        [ 22.926,  10.881],
+        [ 23.128,   9.397],
+        [ 31.254,   0.262],
+        [ 31.771,  -6.385],
+        [ 36.748, -12.413],
+        [ 36.137, -20.093],
+        [ 20.586, -20.492],
+        [ 20.552, -22.493],
+        [ 12.203, -18.294],
+        [  4.709, -20.943],
+        [  2.080, -21.678],
+        [ -0.359, -21.683],
+        [ -3.942, -19.336],
     ],
-    # "track_width" above is shared — update it to match your STL track width
-    # "lane_offset" above is shared — set to ~track_width/4 for your track
-    # "start_jitter" above is shared — set to safe forward range at the start
-    # "checkpoint_count" above is shared
 }
 
-# ── Car ─────────────────────────────────────────────────────────────────────────
+# ── Car ───────────────────────────────────────────────────────────────────
 CAR_CONFIG = {
     "urdf": "racecar/racecar.urdf",   
     "max_drive_torque": 5.0,          
@@ -75,14 +92,14 @@ CAR_JOINT_PATTERNS = {
     "rear":  ["left_rear_wheel_joint", "right_rear_wheel_joint"],
 }
 
-# ── Race rules ──────────────────────────────────────────────────────────────
+# ── Race rules ─────────────────────────────────────────────────────────
 RACE_CONFIG = {
     "num_cars": 2,
     "alternate_lanes": True,      
     "flip_z_threshold": 0.3,      
 }
 
-# ── Reward weights ────────────────────────────────────────────────────────────────
+# ── Reward weights ─────────────────────────────────────────────────────────────
 REWARD_CONFIG = {
     "progress_reward":          100.0,    
     "speed_reward":              0.05,   
@@ -96,7 +113,7 @@ REWARD_CONFIG = {
     "flip_penalty":             -100.0,
 }
 
-# ── RL hyperparameters ─────────────────────────────────────────────────────
+# ── RL hyperparameters ──────────────────────────────────────────────────
 PPO_CONFIG = {
     "learning_rate": 3e-4,
     "n_steps": 2048,
@@ -126,7 +143,7 @@ SAC_CONFIG = {
     "total_timesteps": 1_000_000,
 }
 
-# ── Domain randomization ──────────────────────────────────────────────────────
+# ── Domain randomization ─────────────────────────────────────────────────
 DR_CONFIG = {
     "enabled": True,
     "std_pct": 0.25,            # Increased DR variance

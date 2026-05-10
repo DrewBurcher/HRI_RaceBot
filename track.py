@@ -377,7 +377,7 @@ class MeshTrack:
 
     def signed_lateral(self, x: float, y: float) -> float:
         cx, cy = self.closest_centerline_point(x, y)
-        return float(math.hypot(x - cx, y - cy) - self.track_width / 2.0)
+        return float(math.hypot(x - cx, y - cy))
 
     # Internals
     def _precompute_arclengths(self):

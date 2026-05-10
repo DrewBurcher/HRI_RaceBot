@@ -14,7 +14,7 @@ import pybullet as p
 from config import (CAR_CONFIG, DR_CONFIG, RACE_CONFIG, REWARD_CONFIG,
                      SIM_CONFIG, TRACK_CONFIG)
 from racecar import RaceCar
-from track import OvalTrack, build_track
+from track import build_track
 
 AGENT_IDS = [f"car_{i}" for i in range(RACE_CONFIG["num_cars"])]
 CAR_COLORS = [
@@ -234,13 +234,7 @@ class TwoCarRaceEnv(gym.Env):
         ], dtype=np.float32)
 
     def _signed_lateral(self, x: float, y: float) -> float:
-        sl = self.track.straight_length
-        r = self.track.curve_radius
-        if -sl / 2.0 <= x <= sl / 2.0:
-            return float(abs(y) - r)
-        cx = sl / 2.0 if x > 0 else -sl / 2.0
-        d = float(np.hypot(x - cx, y))
-        return d - r
+        return self.track.signed_lateral(x, y)
 
     def _sample_dr_params(self) -> Dict[str, float]:
         cfg = DR_CONFIG

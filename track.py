@@ -176,6 +176,15 @@ class OvalTrack:
         d = math.hypot(x - cx, y)
         return d < r_in or d > r_out
 
+    def signed_lateral(self, x: float, y: float) -> float:
+        """Signed lateral distance from centerline (positive = outside drivable ring)."""
+        sl = self.straight_length
+        r = self.curve_radius
+        if -sl / 2.0 <= x <= sl / 2.0:
+            return float(abs(y) - r)
+        cx = sl / 2.0 if x > 0 else -sl / 2.0
+        return float(math.hypot(x - cx, y) - r)
+
     # 2. Internals
     def _load_plane(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -275,11 +284,207 @@ class OvalTrack:
         return (x, y), (math.cos(tan_ang), math.sin(tan_ang))
 
 
-def build_track(client: int) -> OvalTrack:
-    """Factory builder for track generation."""
+class MeshTrack:
+    """Racetrack loaded from an STL mesh with a waypoint-defined centerline.
+
+    Set TRACK_CONFIG["shape"] = "mesh" and provide:
+        stl_path      : path to the exported STL file
+        mesh_scale    : [sx, sy, sz] — use [0.001, 0.001, 0.001] for mm→m
+        waypoints     : list of [x, y] pairs (meters) tracing the centerline
+                        counterclockwise, closed loop (last point wraps to first)
+        track_width   : drivable width (m) — used for off-track detection
+        lane_offset   : lateral offset of each spawn lane from the centerline (m)
+        start_jitter  : max random forward shift at spawn (m)
+        checkpoint_count : number of evenly-spaced virtual gates
+
+    The STL is loaded as a static concave trimesh — walls and road surface can
+    all be one mesh, or separate parts placed at known positions.
+    """
+
+    def __init__(self, client: int, cfg: dict | None = None):
+        self.client = client
+        self.cfg = cfg if cfg is not None else TRACK_CONFIG
+
+        self.stl_path: str = self.cfg["stl_path"]
+        self.mesh_scale: List[float] = list(self.cfg.get("mesh_scale", [1.0, 1.0, 1.0]))
+        self.track_width: float = float(self.cfg["track_width"])
+
+        raw = self.cfg["waypoints"]
+        self._waypoints = np.array(raw, dtype=np.float64)   # (N, 2)
+        if len(self._waypoints) < 2:
+            raise ValueError("MeshTrack needs at least 2 waypoints")
+
+        self._seg_lengths, self._cum_lengths = self._precompute_arclengths()
+        self._total_perimeter = float(self._cum_lengths[-1])
+
+        self.body_ids: List[int] = []
+        self.checkpoints: List[Checkpoint] = self._build_checkpoints(
+            self.cfg.get("checkpoint_count", 16))
+
+    # ── Public API ─────────────────────────────────────────────────────
+    def build(self) -> None:
+        self._load_plane()
+        self._load_mesh()
+        self._draw_centerline_visualization()
+
+    def perimeter(self) -> float:
+        return self._total_perimeter
+
+    def spawn_pose(self, lane: int, jitter: float = 0.0
+                   ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
+        from config import CAR_CONFIG
+        pts = self._waypoints
+        tangent = pts[1] - pts[0]
+        tangent = tangent / (np.linalg.norm(tangent) + 1e-12)
+        normal = np.array([-tangent[1], tangent[0]])   # 90° left of travel
+
+        lane_offset = float(self.cfg.get("lane_offset", self.track_width / 4.0))
+        offset = -lane_offset if lane == 0 else +lane_offset
+        pos_xy = pts[0] + offset * normal + jitter * tangent
+        x, y = float(pos_xy[0]), float(pos_xy[1])
+        z = CAR_CONFIG["spawn_z"]
+        yaw = float(math.atan2(float(tangent[1]), float(tangent[0])))
+        quat = p.getQuaternionFromEuler([0.0, 0.0, yaw])
+        return (x, y, z), quat
+
+    def random_start_jitter(self, rng: np.random.Generator) -> float:
+        max_jit = float(self.cfg.get("start_jitter", 2.0))
+        if max_jit <= 0.0:
+            return 0.0
+        return float(rng.uniform(-max_jit / 2.0, max_jit / 2.0))
+
+    def centerline_progress(self, x: float, y: float) -> float:
+        idx, t, _ = self._closest_segment(x, y)
+        s = self._cum_lengths[idx] + t * self._seg_lengths[idx]
+        return float(s % self._total_perimeter)
+
+    def closest_centerline_point(self, x: float, y: float) -> Tuple[float, float]:
+        _, _, cp = self._closest_segment(x, y)
+        return float(cp[0]), float(cp[1])
+
+    def is_off_track(self, x: float, y: float) -> bool:
+        cx, cy = self.closest_centerline_point(x, y)
+        return math.hypot(x - cx, y - cy) > self.track_width / 2.0
+
+    def signed_lateral(self, x: float, y: float) -> float:
+        cx, cy = self.closest_centerline_point(x, y)
+        return float(math.hypot(x - cx, y - cy) - self.track_width / 2.0)
+
+    # ── Internals ─────────────────────────────────────────────────────
+    def _precompute_arclengths(self):
+        pts = self._waypoints
+        n = len(pts)
+        segs = [float(np.linalg.norm(pts[(i + 1) % n] - pts[i])) for i in range(n)]
+        cum = list(np.cumsum([0.0] + segs))   # length n+1
+        return segs, cum
+
+    def _closest_segment(self, x: float, y: float):
+        """Return (seg_idx, t, closest_point) for the nearest point on the centerline."""
+        q = np.array([x, y], dtype=np.float64)
+        pts = self._waypoints
+        n = len(pts)
+        best_dist = float("inf")
+        best_idx, best_t, best_cp = 0, 0.0, pts[0]
+        for i in range(n):
+            a = pts[i]
+            b = pts[(i + 1) % n]
+            ab = b - a
+            ab_sq = float(np.dot(ab, ab))
+            t = float(np.dot(q - a, ab)) / ab_sq if ab_sq > 1e-12 else 0.0
+            t = max(0.0, min(1.0, t))
+            cp = a + t * ab
+            d = float(np.linalg.norm(q - cp))
+            if d < best_dist:
+                best_dist, best_idx, best_t, best_cp = d, i, t, cp
+        return best_idx, best_t, best_cp
+
+    def _point_at_arclength(self, s: float
+                            ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        s = float(s) % self._total_perimeter
+        pts = self._waypoints
+        n = len(pts)
+        i = 0
+        while i < n - 1 and self._cum_lengths[i + 1] < s:
+            i += 1
+        t = (s - self._cum_lengths[i]) / max(self._seg_lengths[i], 1e-12)
+        t = max(0.0, min(1.0, t))
+        a = pts[i]
+        b = pts[(i + 1) % n]
+        pt = a + t * (b - a)
+        tangent = b - a
+        tl = float(np.linalg.norm(tangent))
+        tan_unit = (tangent / tl).tolist() if tl > 1e-12 else [1.0, 0.0]
+        return (float(pt[0]), float(pt[1])), (float(tan_unit[0]), float(tan_unit[1]))
+
+    def _build_checkpoints(self, n: int) -> List[Checkpoint]:
+        perim = self.perimeter()
+        cps: List[Checkpoint] = []
+        for i in range(n):
+            s = i * perim / n
+            pos, tan = self._point_at_arclength(s)
+            cps.append(Checkpoint(index=i, position=pos, tangent=tan))
+        return cps
+
+    def _draw_centerline_visualization(self,
+                                        color: Tuple[float, float, float] = (1.0, 0.85, 0.0),
+                                        width: float = 3.0,
+                                        n_segments: int = 96) -> None:
+        perim = self.perimeter()
+        pts: List[Tuple[float, float, float]] = []
+        for i in range(n_segments + 1):
+            s = (i % n_segments) * perim / n_segments
+            (x, y), _ = self._point_at_arclength(s)
+            pts.append((x, y, 0.02))
+        for a, b in zip(pts[:-1], pts[1:]):
+            try:
+                p.addUserDebugLine(list(a), list(b),
+                                    lineColorRGB=list(color),
+                                    lineWidth=width,
+                                    lifeTime=0,
+                                    physicsClientId=self.client)
+            except Exception:
+                break
+
+    def _load_plane(self) -> None:
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        plane = p.loadURDF("plane.urdf", physicsClientId=self.client)
+        self.body_ids.append(plane)
+
+    def _load_mesh(self) -> None:
+        col = p.createCollisionShape(
+            p.GEOM_MESH,
+            fileName=self.stl_path,
+            meshScale=self.mesh_scale,
+            flags=p.GEOM_FORCE_CONCAVE_TRIMESH,
+            physicsClientId=self.client,
+        )
+        vis = p.createVisualShape(
+            p.GEOM_MESH,
+            fileName=self.stl_path,
+            meshScale=self.mesh_scale,
+            rgbaColor=[0.45, 0.45, 0.45, 1.0],
+            physicsClientId=self.client,
+        )
+        body = p.createMultiBody(
+            baseMass=0.0,
+            baseCollisionShapeIndex=col,
+            baseVisualShapeIndex=vis,
+            basePosition=[0.0, 0.0, 0.0],
+            baseOrientation=p.getQuaternionFromEuler([0.0, 0.0, 0.0]),
+            physicsClientId=self.client,
+        )
+        self.body_ids.append(body)
+
+
+def build_track(client: int):
+    """Factory — returns an OvalTrack or MeshTrack depending on TRACK_CONFIG['shape']."""
     shape = TRACK_CONFIG.get("shape", "oval")
     if shape == "oval":
         track = OvalTrack(client)
         track.build()
         return track
-    raise ValueError(f"Unknown track shape: {shape}")
+    if shape == "mesh":
+        track = MeshTrack(client)
+        track.build()
+        return track
+    raise ValueError(f"Unknown track shape: {shape!r}")

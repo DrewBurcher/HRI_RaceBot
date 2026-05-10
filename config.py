@@ -13,16 +13,47 @@ SIM_CONFIG = {
 
 # ── Track geometry ───────────────────────────────────────────────────────
 TRACK_CONFIG = {
-    "shape": "oval",               
-    "straight_length": 30.0,       
-    "curve_radius": 12.0,          
-    "track_width": 3.0,            # Halved from 6.0
-    "wall_height": 0.6,            
+    # ── Shape selector ──────────────────────────────────────────────────
+    # "oval"  → procedural stadium oval (no STL needed)
+    # "mesh"  → load your SolidWorks STL (fill in the mesh section below)
+    "shape": "oval",
+
+    # ── Oval track parameters (used when shape="oval") ──────────────────
+    "straight_length": 30.0,
+    "curve_radius": 12.0,
+    "track_width": 3.0,
+    "wall_height": 0.6,
     "wall_thickness": 0.3,
-    "num_curve_segments": 24,      
-    "lane_offset": 0.75,           # Scaled proportionally with track_width
-    "start_jitter": 8.0,           
-    "checkpoint_count": 16,        
+    "num_curve_segments": 24,
+    "lane_offset": 0.75,
+    "start_jitter": 8.0,
+    "checkpoint_count": 16,
+
+    # ── Mesh track parameters (used when shape="mesh") ──────────────────
+    # Step 1: export your SolidWorks part as STL (File → Save As → .stl)
+    # Step 2: set stl_path to the path of that file (relative or absolute)
+    # Step 3: set mesh_scale — SolidWorks defaults to mm, PyBullet uses m
+    #         so [0.001, 0.001, 0.001] converts mm → m
+    # Step 4: fill in waypoints — a list of [x, y] points (in meters) that
+    #         trace the track centerline counterclockwise as a closed loop.
+    #         The first waypoint is the spawn/start position.
+    #         Tip: measure key points from your SolidWorks model and convert
+    #         to meters using the same scale as mesh_scale.
+    # Step 5: set track_width to the drivable width of your track (meters)
+    "stl_path": "track.stl",
+    "mesh_scale": [0.001, 0.001, 0.001],   # mm → m (SolidWorks default)
+    "waypoints": [
+        # [x, y] centerline points in meters — fill these in!
+        # Example for a simple oval matching the default track:
+        # [-15.0,  12.0], [0.0,  12.0], [15.0,  12.0],
+        # [22.4,   8.5],  [24.0, 0.0],  [22.4,  -8.5],
+        # [15.0, -12.0],  [0.0, -12.0], [-15.0, -12.0],
+        # [-22.4,  -8.5], [-24.0, 0.0], [-22.4,  8.5],
+    ],
+    # "track_width" above is shared — update it to match your STL track width
+    # "lane_offset" above is shared — set to ~track_width/4 for your track
+    # "start_jitter" above is shared — set to safe forward range at the start
+    # "checkpoint_count" above is shared
 }
 
 # ── Car ─────────────────────────────────────────────────────────────────────────

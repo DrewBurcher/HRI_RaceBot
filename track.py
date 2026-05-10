@@ -288,14 +288,19 @@ class MeshTrack:
     """Racetrack loaded from an STL mesh with a waypoint-defined centerline.
 
     Set TRACK_CONFIG["shape"] = "mesh" and provide:
-        stl_path      : path to the exported STL file
-        mesh_scale    : [sx, sy, sz] — use [0.001, 0.001, 0.001] for mm→m
-        waypoints     : list of [x, y] pairs (meters) tracing the centerline
-                        counterclockwise, closed loop (last point wraps to first)
-        track_width   : drivable width (m) — used for off-track detection
-        lane_offset   : lateral offset of each spawn lane from the centerline (m)
-        start_jitter  : max random forward shift at spawn (m)
-        checkpoint_count : number of evenly-spaced virtual gates
+        stl_path             : path to the exported STL file
+        mesh_scale           : [sx, sy, sz] uniform scale applied to the STL
+        mesh_rotation_euler  : [roll, pitch, yaw] applied after scale; use
+                                [pi/2, 0, 0] if your STL was modelled in the
+                                SolidWorks XZ plane (Y-up)
+        base_position        : [x, y, z] world offset applied after rotation;
+                                use to centre the track on the origin
+        waypoints            : list of [x, y] pairs in PyBullet world meters
+                                (after scale + rotation + offset)
+        track_width          : drivable width (m)
+        lane_offset          : per-lane lateral offset (m)
+        start_jitter         : random forward shift at spawn (m)
+        checkpoint_count     : number of evenly-spaced virtual gates
 
     The STL is loaded as a static concave trimesh — walls and road surface can
     all be one mesh, or separate parts placed at known positions.
@@ -307,6 +312,10 @@ class MeshTrack:
 
         self.stl_path: str = self.cfg["stl_path"]
         self.mesh_scale: List[float] = list(self.cfg.get("mesh_scale", [1.0, 1.0, 1.0]))
+        self.mesh_rotation_euler: List[float] = list(
+            self.cfg.get("mesh_rotation_euler", [0.0, 0.0, 0.0]))
+        self.base_position: List[float] = list(
+            self.cfg.get("base_position", [0.0, 0.0, 0.0]))
         self.track_width: float = float(self.cfg["track_width"])
 
         raw = self.cfg["waypoints"]
@@ -321,7 +330,7 @@ class MeshTrack:
         self.checkpoints: List[Checkpoint] = self._build_checkpoints(
             self.cfg.get("checkpoint_count", 16))
 
-    # ── Public API ─────────────────────────────────────────────────────
+    # Public API
     def build(self) -> None:
         self._load_plane()
         self._load_mesh()
@@ -336,7 +345,7 @@ class MeshTrack:
         pts = self._waypoints
         tangent = pts[1] - pts[0]
         tangent = tangent / (np.linalg.norm(tangent) + 1e-12)
-        normal = np.array([-tangent[1], tangent[0]])   # 90° left of travel
+        normal = np.array([-tangent[1], tangent[0]])   # 90 deg left of travel
 
         lane_offset = float(self.cfg.get("lane_offset", self.track_width / 4.0))
         offset = -lane_offset if lane == 0 else +lane_offset
@@ -370,7 +379,7 @@ class MeshTrack:
         cx, cy = self.closest_centerline_point(x, y)
         return float(math.hypot(x - cx, y - cy) - self.track_width / 2.0)
 
-    # ── Internals ─────────────────────────────────────────────────────
+    # Internals
     def _precompute_arclengths(self):
         pts = self._waypoints
         n = len(pts)
@@ -469,15 +478,15 @@ class MeshTrack:
             baseMass=0.0,
             baseCollisionShapeIndex=col,
             baseVisualShapeIndex=vis,
-            basePosition=[0.0, 0.0, 0.0],
-            baseOrientation=p.getQuaternionFromEuler([0.0, 0.0, 0.0]),
+            basePosition=self.base_position,
+            baseOrientation=p.getQuaternionFromEuler(self.mesh_rotation_euler),
             physicsClientId=self.client,
         )
         self.body_ids.append(body)
 
 
 def build_track(client: int):
-    """Factory — returns an OvalTrack or MeshTrack depending on TRACK_CONFIG['shape']."""
+    """Factory - returns an OvalTrack or MeshTrack depending on TRACK_CONFIG['shape']."""
     shape = TRACK_CONFIG.get("shape", "oval")
     if shape == "oval":
         track = OvalTrack(client)

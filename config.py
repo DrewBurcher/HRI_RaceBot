@@ -16,7 +16,7 @@ TRACK_CONFIG = {
     # ── Shape selector ──────────────────────────────────────────────────
     # "oval"  → procedural stadium oval (no STL needed)
     # "mesh"  → load your SolidWorks STL (fill in the mesh section below)
-    "shape": "oval",
+    "shape": "mesh",
 
     # ── Oval track parameters (used when shape="oval") ──────────────────
     "straight_length": 30.0,
@@ -40,15 +40,32 @@ TRACK_CONFIG = {
     #         Tip: measure key points from your SolidWorks model and convert
     #         to meters using the same scale as mesh_scale.
     # Step 5: set track_width to the drivable width of your track (meters)
-    "stl_path": "track.stl",
-    "mesh_scale": [0.001, 0.001, 0.001],   # mm → m (SolidWorks default)
+    "stl_path": "Track.STL",
+    "mesh_scale": [1.0, 1.0, 1.0],         # Track.STL is authored in meters
+    # SolidWorks default is Y-up; PyBullet is Z-up. Rotate +π/2 about X.
+    "mesh_rpy": [1.5707963267948966, 0.0, 0.0],
+    # Mesh-specific overrides (drivable ring in Track.STL is ~0.5 m wide, so
+    # the oval defaults above are too generous to spawn cars onto).
+    "mesh_track_width": 0.8,
+    "mesh_lane_offset": 0.15,
+    "mesh_start_jitter": 1.0,
+    # After the rotation, recenter the track so its centroid is near the world
+    # origin and the top driving surface sits at z=0. The raw STL footprint is
+    # X∈[3.87, 23.76], Z∈[-10.67, 1.37] with Y∈[0, 0.2] (thickness).
+    "mesh_position": [-14.585, -5.337, -0.18],
     "waypoints": [
-        # [x, y] centerline points in meters — fill these in!
-        # Example for a simple oval matching the default track:
-        # [-15.0,  12.0], [0.0,  12.0], [15.0,  12.0],
-        # [22.4,   8.5],  [24.0, 0.0],  [22.4,  -8.5],
-        # [15.0, -12.0],  [0.0, -12.0], [-15.0, -12.0],
-        # [-22.4,  -8.5], [-24.0, 0.0], [-22.4,  8.5],
+        # Centerline waypoints (meters, post-rotation, post-translation) traced
+        # CCW from the outer perimeter of Track.STL, offset inward by ~0.3 m.
+        [ 4.987,  2.053], [ 3.879,  2.667], [ 2.511,  3.232], [ 1.131,  3.771],
+        [-0.306,  4.090], [-1.784,  4.346], [-3.269,  4.602], [-4.732,  4.854],
+        [-6.211,  4.884], [-7.710,  4.873], [-9.146,  4.835], [-10.200, 4.320],
+        [-9.987,  3.406], [-8.706,  2.920], [-7.443,  3.431], [-6.163,  2.814],
+        [-4.591,  2.820], [-3.087,  2.827], [-1.673,  2.825], [-0.791,  2.150],
+        [-0.237,  0.758], [-0.283, -0.751], [-0.331, -2.257], [-0.947, -3.621],
+        [-1.535, -4.750], [-1.286, -5.814], [-0.105, -5.976], [ 1.185, -5.270],
+        [ 2.749, -5.302], [ 4.033, -6.121], [ 5.407, -6.318], [ 6.882, -6.279],
+        [ 8.252, -6.221], [ 8.812, -5.255], [ 8.781, -3.942], [ 7.744, -2.909],
+        [ 7.378, -1.481], [ 6.811, -0.494], [ 5.317, -0.435], [ 4.665,  0.719],
     ],
     # "track_width" above is shared — update it to match your STL track width
     # "lane_offset" above is shared — set to ~track_width/4 for your track

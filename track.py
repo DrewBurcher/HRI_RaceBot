@@ -307,7 +307,13 @@ class MeshTrack:
 
         self.stl_path: str = self.cfg["stl_path"]
         self.mesh_scale: List[float] = list(self.cfg.get("mesh_scale", [1.0, 1.0, 1.0]))
-        self.track_width: float = float(self.cfg["track_width"])
+        self.track_width: float = float(self.cfg.get("mesh_track_width",
+                                                      self.cfg["track_width"]))
+        self._lane_offset: float = float(self.cfg.get("mesh_lane_offset",
+                                                       self.cfg.get("lane_offset",
+                                                                    self.track_width / 4.0)))
+        self._start_jitter: float = float(self.cfg.get("mesh_start_jitter",
+                                                        self.cfg.get("start_jitter", 2.0)))
 
         raw = self.cfg["waypoints"]
         self._waypoints = np.array(raw, dtype=np.float64)   # (N, 2)
@@ -338,8 +344,7 @@ class MeshTrack:
         tangent = tangent / (np.linalg.norm(tangent) + 1e-12)
         normal = np.array([-tangent[1], tangent[0]])   # 90° left of travel
 
-        lane_offset = float(self.cfg.get("lane_offset", self.track_width / 4.0))
-        offset = -lane_offset if lane == 0 else +lane_offset
+        offset = -self._lane_offset if lane == 0 else +self._lane_offset
         pos_xy = pts[0] + offset * normal + jitter * tangent
         x, y = float(pos_xy[0]), float(pos_xy[1])
         z = CAR_CONFIG["spawn_z"]
@@ -348,7 +353,7 @@ class MeshTrack:
         return (x, y, z), quat
 
     def random_start_jitter(self, rng: np.random.Generator) -> float:
-        max_jit = float(self.cfg.get("start_jitter", 2.0))
+        max_jit = float(self._start_jitter)
         if max_jit <= 0.0:
             return 0.0
         return float(rng.uniform(-max_jit / 2.0, max_jit / 2.0))
@@ -451,6 +456,9 @@ class MeshTrack:
         self.body_ids.append(plane)
 
     def _load_mesh(self) -> None:
+        base_pos = list(self.cfg.get("mesh_position", [0.0, 0.0, 0.0]))
+        base_rpy = list(self.cfg.get("mesh_rpy", [0.0, 0.0, 0.0]))
+        base_quat = p.getQuaternionFromEuler(base_rpy)
         col = p.createCollisionShape(
             p.GEOM_MESH,
             fileName=self.stl_path,
@@ -469,8 +477,8 @@ class MeshTrack:
             baseMass=0.0,
             baseCollisionShapeIndex=col,
             baseVisualShapeIndex=vis,
-            basePosition=[0.0, 0.0, 0.0],
-            baseOrientation=p.getQuaternionFromEuler([0.0, 0.0, 0.0]),
+            basePosition=base_pos,
+            baseOrientation=base_quat,
             physicsClientId=self.client,
         )
         self.body_ids.append(body)

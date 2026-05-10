@@ -21,6 +21,7 @@ reward-component breakdown, race wins, etc. Pass `--headless` and/or
 from __future__ import annotations
 
 import argparse
+from re import sub
 import time
 
 
@@ -67,8 +68,9 @@ def _cmd_debug(args):
 
 def _cmd_train(args):
     from train import train
-    train(algo=args.algo, total_timesteps=args.timesteps,
-          run_name=args.name, headless=args.headless,
+    train(timesteps=args.timesteps,
+          run_name=args.name, 
+          headless=args.headless,
           dashboard=args.dashboard,
           resume_from=getattr(args, "resume_from", None),
           seed=args.seed)
@@ -95,13 +97,11 @@ def main():
     p_debug.set_defaults(func=_cmd_debug)
 
     p_tr = sub.add_parser("train", help="Train two RL policies head-to-head")
-    p_tr.add_argument("--algo", choices=["ppo", "sac"], default="sac")
+    # Removed the --algo argument since train.py is now strictly SAC
     p_tr.add_argument("--timesteps", type=int, default=1_000_000)
     p_tr.add_argument("--name", type=str, default=None)
     p_tr.add_argument("--resume", dest="resume_from", type=str, default=None,
-                       help="Resume from runs/<name> — loads model, "
-                            "VecNormalize, replay buffer, win streaks, etc.")
-    # GUI + dashboard are on by default — pass these to disable.
+                       help="Resume from runs/<name>")
     p_tr.add_argument("--headless", action="store_true",
                        help="Disable PyBullet GUI (default: GUI is on)")
     p_tr.add_argument("--no-dashboard", dest="dashboard",

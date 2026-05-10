@@ -1,33 +1,5 @@
 """
 Gymnasium-compatible two-car racing environment.
-
-Designed around a *parallel* multi-agent interface: each `step()` consumes a
-dict {agent_id: action} and returns dicts for obs/rewards/etc. This keeps
-single- and multi-agent training paths uniform and is trivial to wrap with
-stable-baselines3 (one VecEnv per agent in train.py).
-
-The env is intentionally agnostic about *who* is driving — the agent classes
-in `agents/` plug in cleanly. That makes it easy to mix RL policies, scripted
-opponents, and human drivers (debug mode) without changing this file.
-
-Observation (per car, 14 dims, dtype float32):
-   [0:2]   position (world frame, x y) — z dropped (2D track)
-   [2:4]   forward unit vector (world frame, xy) — heading
-   [4:6]   vector to closest centerline point  (CAR FRAME, xy)
-   [6]     steering angle (rad)
-   [7]     steering rate  (rad/s)
-   [8]     rear-wheel angular velocity (rad/s)
-   [9]     yaw angular velocity (rad/s) — how fast the car is rotating
-   [10:12] vector to other car          (CAR FRAME, xy)
-   [12:14] velocity-difference vector   (CAR FRAME, xy, opp_vel - own_vel)
-
-Action (per car, 2 dims):
-   [0]  steering target,         scaled by max_steer
-   [1]  drive-velocity target,   scaled by vel_target_scale → fed to a PD
-                                  with asymmetric torque clamp
-A first-order low-pass filter (SIM_CONFIG['action_lp_alpha']) is applied
-before each action reaches the car — RL output stays jittery, but the car
-sees a smoothed command.
 """
 
 from __future__ import annotations
@@ -52,10 +24,7 @@ CAR_COLORS = [
     (0.9, 0.8, 0.2, 1.0),    # yellow
 ]
 
-
 class TwoCarRaceEnv(gym.Env):
-    """Multi-car race — returns dict obs/rew keyed by agent id."""
-
     metadata = {"render_modes": ["human", "rgb_array", None],
                 "render_fps": 30}
 
@@ -82,25 +51,19 @@ class TwoCarRaceEnv(gym.Env):
 
         self._prev_progress: Dict[str, float] = {}
         self._lap_progress: Dict[str, float] = {}
-        self._finished: Dict[str, bool] = {}
-        self._winner: Optional[str] = None
         self._flipped: Dict[str, bool] = {}
         self._reward_components: Dict[str, Dict[str, float]] = {}
-        # Most-recent DR sample, surfaced in info for tensorboard logging.
         self._dr_params: Dict[str, float] = {}
-        # Low-pass-filter state: smoothed action per car (zeroed on reset).
         self._smoothed_action: Dict[str, np.ndarray] = {}
 
         self._rng = np.random.default_rng(seed)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                         shape=(2,), dtype=np.float32)
-        # See module docstring for the 14-dim observation layout (z dropped).
         obs_dim = 2 + 2 + 2 + 1 + 1 + 1 + 1 + 2 + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
                                              shape=(obs_dim,), dtype=np.float32)
 
-    # ── Reset / connect ─────────────────────────────────────────────────
     def _connect(self) -> None:
         if self.client is not None:
             try:
@@ -149,20 +112,13 @@ class TwoCarRaceEnv(gym.Env):
 
         self._prev_progress = {}
         self._lap_progress = {}
-        self._finished = {a: False for a in self.agent_ids}
         self._flipped = {a: False for a in self.agent_ids}
         self._reward_components = {a: {} for a in self.agent_ids}
-        # Reset low-pass state — fresh smoothed action per episode.
         self._smoothed_action = {a: np.zeros(2, dtype=np.float32)
                                   for a in self.agent_ids}
-        self._winner = None
         self._step_count = 0
 
-        # Domain randomization: sample once per episode, apply to BOTH cars
-        # (so head-to-head racing stays fair within an episode but the
-        #  dynamics vary across episodes).
-        self._dr_params = self._sample_dr_params() if DR_CONFIG.get("enabled") \
-            else {}
+        self._dr_params = self._sample_dr_params() if DR_CONFIG.get("enabled") else {}
         if self._dr_params:
             self._apply_dr_params(self._dr_params)
 
@@ -181,7 +137,6 @@ class TwoCarRaceEnv(gym.Env):
                 for i, a in enumerate(self.agent_ids)}
         return obs, info
 
-    # ── Step ───────────────────────────────────────────────────────────────────────
     def step(self, actions: Dict[str, np.ndarray]
              ) -> Tuple[Dict[str, np.ndarray], Dict[str, float],
                         Dict[str, bool], Dict[str, bool], Dict[str, dict]]:
@@ -191,18 +146,12 @@ class TwoCarRaceEnv(gym.Env):
             term = {a: True for a in self.agent_ids}
             return obs, zeros, term, term, info
 
-        # Low-pass-filter the action before it hits PyBullet.  RL outputs
-        # raw, jittery commands at ~30 Hz; smoothing here gives the car a
-        # cleaner control signal without changing what the policy "sees".
-        # The filter is per-car so opponents and learners are both smoothed.
         alpha = float(SIM_CONFIG.get("action_lp_alpha", 1.0))
         for a, car in self.cars.items():
             raw = np.asarray(actions.get(a, np.zeros(2, dtype=np.float32)),
                              dtype=np.float32)
             raw = np.clip(raw, -1.0, 1.0)
-            prev = self._smoothed_action.get(a)
-            if prev is None:
-                prev = np.zeros(2, dtype=np.float32)
+            prev = self._smoothed_action.get(a, np.zeros(2, dtype=np.float32))
             sm = alpha * raw + (1.0 - alpha) * prev
             self._smoothed_action[a] = sm
             car.apply_action(steer=float(sm[0]), vel_cmd=float(sm[1]))
@@ -224,17 +173,17 @@ class TwoCarRaceEnv(gym.Env):
         truncated = {a: self._step_count >= SIM_CONFIG["max_episode_steps"]
                      for a in self.agent_ids}
         obs = self._build_obs_all()
-
         info = self._build_info()
-        if self._winner is not None:
-            for a in self.agent_ids:
-                terminated[a] = True
+
+        # Dynamic winner calculation based on continuous max progress
+        current_winner = max(self.agent_ids, key=lambda a: self._lap_progress[a])
+        info["__winner__"] = current_winner
+
+        if any(terminated.values()) or any(truncated.values()):
             self._race_index += 1
-            info["__winner__"] = self._winner
-            info["__race_index__"] = self._race_index
+
         return obs, rewards, terminated, truncated, info
 
-    # ── Observation builder ─────────────────────────────────────────────
     def _build_obs_all(self) -> Dict[str, np.ndarray]:
         obs = {}
         states = {a: c.get_state() for a, c in self.cars.items()}
@@ -242,19 +191,11 @@ class TwoCarRaceEnv(gym.Env):
             obs[a] = self._build_obs(a, states)
         return obs
 
-    def _world_to_car_xy(self, yaw: float, x: float, y: float
-                          ) -> Tuple[float, float]:
-        """Rotate a world-frame XY vector into the car's local-yaw frame.
-
-        Roll/pitch ignored — for a wheeled vehicle on the ground they're
-        tiny and ignoring them keeps the obs interpretable. Track is 2D so
-        z components are dropped from all relative-vector observations.
-        """
+    def _world_to_car_xy(self, yaw: float, x: float, y: float) -> Tuple[float, float]:
         c, s = np.cos(yaw), np.sin(yaw)
         return c * x + s * y, -s * x + c * y
 
-    def _build_obs(self, agent_id: str,
-                   states: Dict[str, dict]) -> np.ndarray:
+    def _build_obs(self, agent_id: str, states: Dict[str, dict]) -> np.ndarray:
         s = states[agent_id]
         pos = s["position"]
         lin = s["linear_velocity"]
@@ -263,51 +204,36 @@ class TwoCarRaceEnv(gym.Env):
         car = self.cars[agent_id]
         yaw = float(eul[2])
 
-        # 1. Position (world frame, XY only). z is constant on a 2D track and
-        #    only adds noise to the policy. Flip detection still uses the
-        #    car's local up vector via car.up_z(), independent of obs.
         pos_xy = np.array([pos[0], pos[1]], dtype=np.float32)
-
-        # 2. Forward unit vector (world frame, xy only).
         fwd_w = car.forward_unit_vector()
         fwd_xy = np.array([fwd_w[0], fwd_w[1]], dtype=np.float32)
 
-        # 3. Vector to closest centerline point (CAR FRAME, xy).
         cx, cy = self.track.closest_centerline_point(float(pos[0]), float(pos[1]))
-        cx_local, cy_local = self._world_to_car_xy(
-            yaw, cx - float(pos[0]), cy - float(pos[1]))
+        cx_local, cy_local = self._world_to_car_xy(yaw, cx - float(pos[0]), cy - float(pos[1]))
 
         steer_angle, steer_rate = car.steering_state()
         rear_wvel = car.rear_wheel_velocity()
-        yaw_rate = float(ang[2])   # world-frame z-axis angular vel ≈ yaw rate
+        yaw_rate = float(ang[2])
 
-        # 4. Opponent relative pose (CAR FRAME, xy).
         opp_id = next((b for b in self.agent_ids if b != agent_id), agent_id)
         opp = states[opp_id]
         ox_local, oy_local = self._world_to_car_xy(
-            yaw,
-            float(opp["position"][0] - pos[0]),
-            float(opp["position"][1] - pos[1]))
+            yaw, float(opp["position"][0] - pos[0]), float(opp["position"][1] - pos[1]))
 
-        # 5. Velocity-difference vector (CAR FRAME, xy).
         dvel = (opp["linear_velocity"] - lin).astype(np.float32)
-        dvx_local, dvy_local = self._world_to_car_xy(
-            yaw, float(dvel[0]), float(dvel[1]))
+        dvx_local, dvy_local = self._world_to_car_xy(yaw, float(dvel[0]), float(dvel[1]))
 
         return np.array([
-            pos_xy[0], pos_xy[1],                  # [0:2]
-            fwd_xy[0], fwd_xy[1],                  # [2:4]
-            cx_local, cy_local,                    # [4:6]
-            steer_angle,                           # [6]
-            steer_rate,                            # [7]
-            rear_wvel,                             # [8]
-            yaw_rate,                              # [9]
-            ox_local, oy_local,                    # [10:12]
-            dvx_local, dvy_local,                  # [12:14]
+            pos_xy[0], pos_xy[1],
+            fwd_xy[0], fwd_xy[1],
+            cx_local, cy_local,
+            steer_angle, steer_rate,
+            rear_wvel, yaw_rate,
+            ox_local, oy_local,
+            dvx_local, dvy_local,
         ], dtype=np.float32)
 
     def _signed_lateral(self, x: float, y: float) -> float:
-        """Signed lateral offset from the centerline (positive = outside)."""
         sl = self.track.straight_length
         r = self.track.curve_radius
         if -sl / 2.0 <= x <= sl / 2.0:
@@ -316,13 +242,7 @@ class TwoCarRaceEnv(gym.Env):
         d = float(np.hypot(x - cx, y))
         return d - r
 
-    # ── Domain randomization ──────────────────────────────────────────────────
     def _sample_dr_params(self) -> Dict[str, float]:
-        """Sample per-episode DR values from N(default, std_pct·|default|),
-        clamped to [clip_lo, clip_hi]·default. Returns {} if DR disabled.
-
-        Symmetric clamp handles negative defaults (e.g. gravity = -9.81).
-        """
         cfg = DR_CONFIG
         if not cfg.get("enabled"):
             return {}
@@ -344,16 +264,12 @@ class TwoCarRaceEnv(gym.Env):
         wanted = set(cfg.get("params", []))
 
         if "max_drive_torque" in wanted:
-            params["max_drive_torque"] = sample_around(
-                CAR_CONFIG["max_drive_torque"])
+            params["max_drive_torque"] = sample_around(CAR_CONFIG["max_drive_torque"])
         if "traction" in wanted:
-            # default μ = 1.0; use the same std_pct around it
-            params["traction"] = clip_around(
-                1.0, float(rng.normal(1.0, s)))
+            params["traction"] = clip_around(1.0, float(rng.normal(1.0, s)))
         if "gravity" in wanted:
             params["gravity"] = sample_around(SIM_CONFIG["gravity"])
         if "car_mass" in wanted:
-            # Read the (URDF-defined) baseline once, then perturb.
             if not hasattr(self, "_baseline_chassis_mass"):
                 first_car = next(iter(self.cars.values()))
                 self._baseline_chassis_mass = first_car.chassis_mass()
@@ -364,20 +280,12 @@ class TwoCarRaceEnv(gym.Env):
         return params
 
     def _apply_dr_params(self, params: Dict[str, float]) -> None:
-        """Push sampled DR values into PyBullet + RaceCar instance state.
-
-        Brake torque scales proportionally with drive torque so the asymmetric
-        ratio (≈ 2x braking) stays consistent under DR.
-        """
         if "gravity" in params:
-            p.setGravity(0, 0, float(params["gravity"]),
-                          physicsClientId=self.client)
+            p.setGravity(0, 0, float(params["gravity"]), physicsClientId=self.client)
         if "dt" in params:
-            p.setTimeStep(float(params["dt"]),
-                           physicsClientId=self.client)
+            p.setTimeStep(float(params["dt"]), physicsClientId=self.client)
 
-        brake_ratio = (CAR_CONFIG["max_brake_torque"]
-                        / CAR_CONFIG["max_drive_torque"])
+        brake_ratio = CAR_CONFIG["max_brake_torque"] / CAR_CONFIG["max_drive_torque"]
         for car in self.cars.values():
             if "max_drive_torque" in params:
                 car.set_max_drive_torque(params["max_drive_torque"])
@@ -388,18 +296,10 @@ class TwoCarRaceEnv(gym.Env):
                 car.set_chassis_mass(params["car_mass"])
 
     def _check_collisions(self, car: RaceCar) -> Tuple[bool, bool]:
-        """Return (hit_wall, hit_other_car) for the given car.
-
-        getContactPoints with no `bodyB` returns all contacts the car is
-        currently in. We filter out the ground plane (touched every step
-        under the wheels — that's not a collision).
-        """
         plane_id = self.track.body_ids[0] if self.track else -1
         other_bodies = {c.body for c in self.cars.values() if c is not car}
-        contacts = p.getContactPoints(bodyA=car.body,
-                                       physicsClientId=self.client)
-        hit_wall = False
-        hit_car = False
+        contacts = p.getContactPoints(bodyA=car.body, physicsClientId=self.client)
+        hit_wall, hit_car = False, False
         for c in contacts:
             bid = c[2]
             if bid == plane_id or bid == car.body:
@@ -416,15 +316,14 @@ class TwoCarRaceEnv(gym.Env):
         perim = self.track.perimeter()
         thr_z = float(RACE_CONFIG.get("flip_z_threshold", 0.3))
 
-        # First pass: lap progress (used for the relative-progress term).
         progress_delta: Dict[str, float] = {}
         for a, car in self.cars.items():
             x, y, _ = car.get_state()["position"]
             new_prog_raw = self.track.centerline_progress(x, y)
             delta = new_prog_raw - self._prev_progress[a]
-            if delta > perim / 2.0:           # wrapped backward
+            if delta > perim / 2.0:
                 delta -= perim
-            elif delta < -perim / 2.0:        # wrapped forward (lap done)
+            elif delta < -perim / 2.0:
                 delta += perim
             self._lap_progress[a] += delta
             self._prev_progress[a] = new_prog_raw
@@ -438,15 +337,16 @@ class TwoCarRaceEnv(gym.Env):
             comp: Dict[str, float] = {}
             comp["progress"] = rcfg["progress_reward"] * progress_delta[a]
             comp["speed"] = rcfg["speed_reward"] * car.speed()
-            comp["upright"] = rcfg["upright_reward"] * (
-                float(roll) ** 2 + float(pitch) ** 2)
+            comp["upright"] = rcfg["upright_reward"] * (float(roll) ** 2 + float(pitch) ** 2)
+            
             opp_id = next((b for b in self.agent_ids if b != a), a)
-            comp["relative"] = rcfg["relative_progress_reward"] * (
-                self._lap_progress[a] - self._lap_progress[opp_id])
+            comp["relative"] = rcfg["relative_progress_reward"] * (self._lap_progress[a] - self._lap_progress[opp_id])
+            
             lat = self._signed_lateral(x, y)
             dead = float(rcfg.get("centerline_dead_zone", 0.0))
             excess = max(0.0, abs(lat) - dead)
             comp["centerline"] = rcfg["centerline_penalty"] * (excess ** 2)
+            
             if self.track.is_off_track(x, y):
                 comp["off_track"] = rcfg["off_track_penalty"]
 
@@ -456,38 +356,16 @@ class TwoCarRaceEnv(gym.Env):
             if hit_car:
                 comp["car_hit"] = rcfg["car_collision_penalty"]
 
-            # Flip detection (sticky once flipped).
             if not self._flipped[a] and car.up_z() < thr_z:
                 self._flipped[a] = True
                 comp["flip"] = rcfg["flip_penalty"]
 
-            # Lap completion → race winner / loser.
-            if (not self._finished[a]
-                    and self._lap_progress[a] >= RACE_CONFIG["laps_to_finish"] * perim):
-                self._finished[a] = True
-                if self._winner is None:
-                    self._winner = a
-                    comp["win"] = rcfg["win_bonus"]
-                else:
-                    comp["lose"] = rcfg["lose_penalty"]
-
-            r = float(sum(comp.values()))
-            rewards[a] = r
+            rewards[a] = float(sum(comp.values()))
             self._reward_components[a] = comp
-
-        # Loser(s) get the lose penalty whenever a winner is declared.
-        if self._winner is not None:
-            for a in self.agent_ids:
-                if a != self._winner and not self._finished[a]:
-                    rewards[a] += rcfg["lose_penalty"]
-                    self._reward_components[a]["lose"] = (
-                        self._reward_components[a].get("lose", 0.0)
-                        + rcfg["lose_penalty"])
 
         return rewards
 
     def _check_terminations(self) -> Dict[str, bool]:
-        # Per spec: terminate on flip, do not terminate on stuck.
         return {a: bool(self._flipped[a]) for a in self.agent_ids}
 
     def _build_info(self) -> Dict[str, dict]:
@@ -495,14 +373,12 @@ class TwoCarRaceEnv(gym.Env):
         for a in self.agent_ids:
             info[a] = {
                 "lap_progress": float(self._lap_progress[a]),
-                "finished": self._finished[a],
                 "flipped": self._flipped[a],
                 "reward_components": dict(self._reward_components.get(a, {})),
                 "dr_params": dict(self._dr_params),
             }
         return info
 
-    # ── Render / close ─────────────────────────────────────────────────────────
     def close(self):
         if self.client is not None:
             try:
@@ -512,52 +388,3 @@ class TwoCarRaceEnv(gym.Env):
             self.client = None
             self.track = None
             self.cars = {}
-
-
-class SingleAgentRaceWrapper(gym.Env):
-    """Wraps `TwoCarRaceEnv` so SB3 sees a single-agent gym env.
-
-    The opponent policy is provided at construction time — a frozen snapshot
-    of the *other* learner, a scripted bot, or a human keyboard agent. This
-    is the seam train.py uses to train two policies in parallel.
-    """
-
-    metadata = {"render_modes": ["human", "rgb_array", None],
-                "render_fps": 30}
-
-    def __init__(self, base_env: TwoCarRaceEnv, learner_id: str,
-                 opponent_policy):
-        super().__init__()
-        self.base = base_env
-        self.learner_id = learner_id
-        self.opp_policy = opponent_policy
-        self.action_space = base_env.action_space
-        self.observation_space = base_env.observation_space
-        self._last_obs: Optional[Dict[str, np.ndarray]] = None
-
-    def reset(self, *, seed=None, options=None):
-        obs, info = self.base.reset(seed=seed, options=options)
-        self._last_obs = obs
-        return obs[self.learner_id], info.get(self.learner_id, {})
-
-    def step(self, action):
-        actions = {self.learner_id: np.asarray(action, dtype=np.float32)}
-        for a in self.base.agent_ids:
-            if a == self.learner_id:
-                continue
-            obs_a = self._last_obs[a] if self._last_obs is not None else None
-            actions[a] = self.opp_policy.act(obs_a)
-        obs, rew, term, trunc, info = self.base.step(actions)
-        self._last_obs = obs
-        info_l = info.get(self.learner_id, {})
-        if "__winner__" in info:
-            info_l["winner"] = info["__winner__"]
-            info_l["is_winner"] = info["__winner__"] == self.learner_id
-        return (obs[self.learner_id], rew[self.learner_id],
-                term[self.learner_id], trunc[self.learner_id], info_l)
-
-    def render(self):
-        return None
-
-    def close(self):
-        self.base.close()

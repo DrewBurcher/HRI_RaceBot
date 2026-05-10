@@ -53,11 +53,11 @@ RACE_CONFIG = {
 
 # ── Reward weights ────────────────────────────────────────────────────────────────
 REWARD_CONFIG = {
-    "progress_reward":          100.0,    
-    "speed_reward":              0.05,   
+    "progress_reward":          200.0,    
+    "speed_reward":              5,   
     "upright_reward":           -2.0,    
-    "relative_progress_reward":  0.1,    
-    "centerline_penalty":       -0.2,    # Doubled to heavily enforce racing line
+    "relative_progress_reward":  100,    
+    "centerline_penalty":       -1,    # Doubled to heavily enforce racing line
     "centerline_dead_zone":      0.0,    
     "wall_collision_penalty":   -20.0,   
     "car_collision_penalty":    -50.0,   # Increased avoidance gradient

@@ -116,9 +116,16 @@ class Dashboard:
         self.smooth_window = int(val)
 
     def _get_reward_keys(self, rcs):
+        """Dynamically scan ALL episodes to find every key that has occurred."""
         if not rcs:
             return []
-        return [k for k in rcs[0].keys() if k not in ("episode", "timestep", "ep_length", "flipped", "is_winner")]
+        
+        all_keys = set()
+        for episode_data in rcs:
+            all_keys.update(episode_data.keys())
+            
+        ignore = {"episode", "timestep", "ep_length", "flipped", "is_winner"}
+        return sorted([k for k in all_keys if k not in ignore])
 
     def _draw_episode_reward(self, ax, car_id: str, metrics):
         ax.clear()
@@ -165,17 +172,21 @@ class Dashboard:
     def _draw_components(self, ax, car_id: str, metrics):
         ax.clear()
         rcs = (metrics or {}).get("reward_components", [])
+        
+        # Render immediately on episode 1
         if len(rcs) > 0:
             eps = [e.get("episode", i) for i, e in enumerate(rcs)]
             keys = self._get_reward_keys(rcs)
             
             for k in keys:
                 vals = np.array([e.get(k, 0.0) for e in rcs])
-                if not np.any(vals):
-                    continue
+                
+                # Removed the zero-value check so keys always show if they exist in the JSON
                 color = COMPONENT_COLORS.get(k, None)
                 ax.plot(eps, _smooth(vals, self.smooth_window), color=color, linewidth=1.5, label=k)
-            ax.legend(fontsize=6, loc="best", ncol=2)
+                
+            if keys:
+                ax.legend(fontsize=6, loc="best", ncol=2)
         else:
             ax.text(0.5, 0.5, "Waiting for components…", ha="center", va="center", transform=ax.transAxes)
             

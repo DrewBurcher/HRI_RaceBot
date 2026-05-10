@@ -175,7 +175,6 @@ class TwoCarRaceEnv(gym.Env):
         obs = self._build_obs_all()
         info = self._build_info()
 
-        # Dynamic winner calculation based on continuous max progress
         current_winner = max(self.agent_ids, key=lambda a: self._lap_progress[a])
         info["__winner__"] = current_winner
 
@@ -266,7 +265,7 @@ class TwoCarRaceEnv(gym.Env):
         if "max_drive_torque" in wanted:
             params["max_drive_torque"] = sample_around(CAR_CONFIG["max_drive_torque"])
         if "traction" in wanted:
-            params["traction"] = clip_around(1.0, float(rng.normal(1.0, s)))
+            params["traction"] = clip_around(0.75, float(rng.normal(0.75, s)))
         if "gravity" in wanted:
             params["gravity"] = sample_around(SIM_CONFIG["gravity"])
         if "car_mass" in wanted:
@@ -301,10 +300,10 @@ class TwoCarRaceEnv(gym.Env):
         contacts = p.getContactPoints(bodyA=car.body, physicsClientId=self.client)
         hit_wall, hit_car = False, False
         for c in contacts:
-            bid = c[2]
-            if bid == plane_id or bid == car.body:
+            other_bid = c[2] if c[1] == car.body else c[1]
+            if other_bid == plane_id:
                 continue
-            if bid in other_bodies:
+            if other_bid in other_bodies:
                 hit_car = True
             else:
                 hit_wall = True
@@ -340,7 +339,9 @@ class TwoCarRaceEnv(gym.Env):
             comp["upright"] = rcfg["upright_reward"] * (float(roll) ** 2 + float(pitch) ** 2)
             
             opp_id = next((b for b in self.agent_ids if b != a), a)
-            comp["relative"] = rcfg["relative_progress_reward"] * (self._lap_progress[a] - self._lap_progress[opp_id])
+            delta_prog_a = progress_delta[a]
+            delta_prog_opp = progress_delta.get(opp_id, 0.0)
+            comp["relative"] = rcfg["relative_progress_reward"] * (delta_prog_a - delta_prog_opp)
             
             lat = self._signed_lateral(x, y)
             dead = float(rcfg.get("centerline_dead_zone", 0.0))

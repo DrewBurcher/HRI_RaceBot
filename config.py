@@ -21,7 +21,7 @@ TRACK_CONFIG = {
     "wall_thickness": 0.3,
     "num_curve_segments": 24,      
     "lane_offset": 0.75,           # Scaled proportionally with track_width
-    "start_jitter": 8.0,           
+    "start_jitter": 5.0,           
     "checkpoint_count": 16,        
 }
 
@@ -53,10 +53,10 @@ RACE_CONFIG = {
 
 # ── Reward weights ────────────────────────────────────────────────────────────────
 REWARD_CONFIG = {
-    "progress_reward":          200.0,    
-    "speed_reward":              5,   
+    "progress_reward":          500.0,    
+    "speed_reward":              2,   
     "upright_reward":           -2.0,    
-    "relative_progress_reward":  100,    
+    "relative_progress_reward":  250,    
     "centerline_penalty":       -1,    # Doubled to heavily enforce racing line
     "centerline_dead_zone":      0.0,    
     "wall_collision_penalty":   -20.0,   
@@ -77,7 +77,7 @@ PPO_CONFIG = {
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
-    "policy_kwargs": dict(net_arch=dict(pi=[64], vf=[32])),
+    "policy_kwargs": dict(net_arch=dict(pi=[256,256], vf=[256,256])),
     "device": "cpu",
     "total_timesteps": 1_000_000,
 }
@@ -90,7 +90,7 @@ SAC_CONFIG = {
     "tau": 0.005,
     "gamma": 0.99,
     "ent_coef": "auto",
-    "policy_kwargs": dict(net_arch=dict(pi=[64], qf=[32])),
+    "policy_kwargs": dict(net_arch=dict(pi=[128, 128], qf=[128, 128])),
     "device": "cpu",
     "total_timesteps": 1_000_000,
 }
@@ -98,7 +98,7 @@ SAC_CONFIG = {
 # ── Domain randomization ──────────────────────────────────────────────────────
 DR_CONFIG = {
     "enabled": True,
-    "std_pct": 0.25,            # Increased DR variance
+    "std_pct": 0.1,            # Increased DR variance
     "clip_lo_pct": 0.5,         
     "clip_hi_pct": 1.5,         
     "params": [

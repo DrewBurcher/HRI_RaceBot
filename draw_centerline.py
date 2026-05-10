@@ -73,12 +73,16 @@ def boundary_edges_top_face(tris: np.ndarray) -> List[Tuple[np.ndarray, np.ndarr
 def to_world_xy(p_xz: np.ndarray) -> np.ndarray:
     """Convert STL (x, z) into the world (x, y) used by MeshTrack waypoints.
 
-    MeshTrack rotates +π/2 about X (so y' = -z_stl, z' = y_stl) and then shifts
-    the slab by mesh_position. Waypoints are in the post-transform world frame.
+    MeshTrack scales by `mesh_scale`, rotates +π/2 about X (so y' = -z_stl,
+    z' = y_stl), then shifts by the configured base position. Supports both
+    `base_position` (Dom's-Track keys) and `mesh_position` (older keys).
     """
     x_stl, z_stl = float(p_xz[0]), float(p_xz[1])
-    pos = TRACK_CONFIG.get("mesh_position", [0.0, 0.0, 0.0])
-    return np.array([x_stl + pos[0], -z_stl + pos[1]])
+    scale = TRACK_CONFIG.get("mesh_scale", [1.0, 1.0, 1.0])
+    pos = TRACK_CONFIG.get("base_position",
+                           TRACK_CONFIG.get("mesh_position", [0.0, 0.0, 0.0]))
+    return np.array([x_stl * float(scale[0]) + float(pos[0]),
+                     -z_stl * float(scale[2]) + float(pos[1])])
 
 
 def main() -> None:

@@ -29,7 +29,7 @@ TRACK_CONFIG = {
     "num_curve_segments": 24,      # higher = smoother curves, more wall bodies
     "lane_offset": 1.5,            # half-distance between inner/outer spawn lanes (m)
     "start_jitter": 8.0,           # random shift along the straight at reset (m)
-    "checkpoint_count": 16,        # virtual gates for lap progress
+    "checkpoint_count": 48,        # virtual gates for lap progress
 }
 
 # ── Car ─────────────────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ RACE_CONFIG = {
 # ── Reward weights ────────────────────────────────────────────────────────────────
 REWARD_CONFIG = {
     # Densely shaped:
-    "progress_reward":          10.0,    # × Δ centerline arc-length per step.
+    "progress_reward":          100.0,    # × Δ centerline arc-length per step.
                                           # The dominant signal — at ~4 m/s
                                           # this is ~1.3/step, larger than
                                           # any single penalty so the policy
@@ -82,7 +82,7 @@ REWARD_CONFIG = {
     "centerline_dead_zone":      0.0,    # disabled (continuous quadratic)
     # Per-step penalties:
     "wall_collision_penalty":   -20.0,   # while in contact with any wall body
-    "car_collision_penalty":    -20.0,   # while in contact with the other car
+    "car_collision_penalty":    -50.0,   # while in contact with the other car
     "off_track_penalty":        -5.0,    # while off the drivable ring
     # Sparse / terminal:
     "win_bonus":                 100.0,

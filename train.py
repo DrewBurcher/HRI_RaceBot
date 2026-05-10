@@ -205,7 +205,6 @@ def _make_vec_env(base_env: TwoCarRaceEnv, learner_id: str, opponent,
     return VecNormalize(venv, norm_obs=True, norm_reward=True,
                          clip_obs=10.0, clip_reward=10.0)
 
-
 @dataclass
 class LearnerState:
     agent_id: str
@@ -375,17 +374,6 @@ def _load_resume_state(log_dir: str, algo: str,
 def _refresh_opponents(base_env: TwoCarRaceEnv,
                        learners: List[LearnerState],
                        log_dir: str) -> None:
-    """Each learner gets a frozen snapshot of the *other* learner.
-
-    Snapshotting via save→load (not copy.deepcopy) — SB3 models hold
-    references to their VecEnv and to PyTorch tensors, so deepcopy
-    intermittently chokes on them. Save/load is bulletproof and only
-    marginally slower.
-
-    Also preserves VecNormalize obs/reward statistics across the refresh.
-    Otherwise we'd reset the running RMS to zero on every refresh, briefly
-    feeding the policy un-normalized observations until stats re-converge.
-    """
     snapshots: Dict[str, object] = {}
     for L in learners:
         tmp_path = os.path.join(log_dir, f".tmp_snapshot_{L.agent_id}.zip")
@@ -400,19 +388,8 @@ def _refresh_opponents(base_env: TwoCarRaceEnv,
     for L in learners:
         opp_id = next(o for o in [x.agent_id for x in learners] if o != L.agent_id)
         opp = FrozenRLAgent(snapshots[opp_id], deterministic=True)
-
-        old_obs_rms = getattr(L.env, "obs_rms", None)
-        old_ret_rms = getattr(L.env, "ret_rms", None)
-
-        new_env = _wrap_for_learner(base_env, L.agent_id, opp,
-                                     log_dir, learner_tag=L.agent_id)
-        if old_obs_rms is not None:
-            new_env.obs_rms = old_obs_rms
-        if old_ret_rms is not None:
-            new_env.ret_rms = old_ret_rms
-
-        L.env = new_env
-        L.model.set_env(L.env)
+        
+        L.env.venv.envs[0].env.opp_policy = opp
 
 
 def train(algo: str = "sac",
@@ -561,7 +538,7 @@ def train(algo: str = "sac",
             for L in learners:
                 L.history.append(snapshot)
             with open(os.path.join(log_dir, "history.json"), "w") as f:
-                json.dump([L.history[-1] for L in learners], f, indent=2)
+                json.dump(snapshot["learners"], f, indent=2)
             print(f"[train] block summary: {wins_this_block}")
 
             # Snapshot resume state every chunk. Replay buffer is heavy

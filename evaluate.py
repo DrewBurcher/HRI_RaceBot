@@ -27,9 +27,19 @@ def evaluate(run_dir: str, algo: str = "sac", episodes: int = 10,
     for a in env.agent_ids:
         path = os.path.join(run_dir, f"{a}_{algo}_final")
         if not (os.path.exists(path) or os.path.exists(path + ".zip")):
-            raise FileNotFoundError(
-                f"Could not find trained model for {a} at {path}.zip")
-        agents[a] = RLAgent(path, algo=algo)
+            # Fall back to the _latest checkpoint (written every chunk, also on
+            # Ctrl+C). Lets you race a run that was interrupted before its
+            # final timestep budget completed.
+            latest = os.path.join(run_dir, f"{a}_{algo}_latest")
+            if os.path.exists(latest) or os.path.exists(latest + ".zip"):
+                path = latest
+            else:
+                raise FileNotFoundError(
+                    f"Could not find trained model for {a} at "
+                    f"{path}.zip or {latest}.zip")
+        vn_path = os.path.join(run_dir, f"{a}_vecnormalize.pkl")
+        agents[a] = RLAgent(path, algo=algo,
+                            vecnormalize_path=vn_path if os.path.exists(vn_path) else None)
 
     wins = {a: 0 for a in env.agent_ids}
     wins["draw"] = 0

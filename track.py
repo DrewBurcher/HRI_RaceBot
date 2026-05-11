@@ -376,6 +376,8 @@ class MeshTrack:
         return math.hypot(x - cx, y - cy) > self.track_width / 2.0
 
     def signed_lateral(self, x: float, y: float) -> float:
+        """Distance from the centerline (always ≥ 0). Matches OvalTrack so the
+        env's centerline_penalty is 0 on the racing line — see env._compute_rewards."""
         cx, cy = self.closest_centerline_point(x, y)
         return float(math.hypot(x - cx, y - cy))
 

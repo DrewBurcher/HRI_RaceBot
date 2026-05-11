@@ -54,18 +54,21 @@ def _episodes_from_metrics(run_dir: str, car: str) -> Optional[pd.DataFrame]:
     """Reconstruct per-episode (reward, length) from metrics_<car>.json.
 
     Each row in metrics["reward_components"] is one episode's per-step mean
-    of every reward component (plus ep_length). So the episode reward is
-    sum(components) * ep_length.
+    of every reward component (plus bookkeeping fields). Episode reward is
+    sum(component_means) * ep_length.
     """
     m = _read_metrics(run_dir, car)
     if not m or not m.get("reward_components"):
         return None
     rows = m["reward_components"]
-    ignore = {"timestep", "ep_count", "ep_length"}
+    # Bookkeeping / non-reward fields written alongside the components.
+    ignore = {"timestep", "ep_count", "ep_length",
+              "episode", "flipped", "is_winner"}
     out = []
     for r in rows:
         ep_len = float(r.get("ep_length", 0)) or 0.0
-        ep_rew = sum(float(v) for k, v in r.items() if k not in ignore) * ep_len
+        ep_rew = sum(float(v) for k, v in r.items()
+                     if k not in ignore and isinstance(v, (int, float)) and not isinstance(v, bool)) * ep_len
         out.append({"r": ep_rew, "l": ep_len, "t": float(r.get("timestep", 0))})
     return pd.DataFrame(out)
 
@@ -171,15 +174,46 @@ def plot_reward_components(run_dir: str, fig_dir: str, label: str = "") -> None:
 
 
 def plot_race_wins(run_dir: str, fig_dir: str, label: str = "") -> None:
+    """Cumulative wins per car over training.
+
+    Prefers history.json (one entry per inter-chunk race). Falls back to
+    metrics_*.json's per-episode `is_winner` boolean — every episode then
+    counts as one race.
+    """
     history = _read_history(run_dir)
-    if not history:
-        return
     cum: Dict[str, List[int]] = {car: [0] for car in CARS}
     cum["draw"] = [0]
-    for entry in history:
-        winner = entry.get("winner") if isinstance(entry, dict) else entry
-        for key in cum:
-            cum[key].append(cum[key][-1] + (1 if winner == key else 0))
+
+    if history:
+        for entry in history:
+            winner = entry.get("winner") if isinstance(entry, dict) else entry
+            for key in cum:
+                cum[key].append(cum[key][-1] + (1 if winner == key else 0))
+        x_label = "race index"
+        title_extra = ""
+    else:
+        flags = {car: [] for car in CARS}
+        for car in CARS:
+            m = _read_metrics(run_dir, car)
+            if m and m.get("reward_components"):
+                flags[car] = [bool(r.get("is_winner", False))
+                              for r in m["reward_components"]]
+        n = min(len(flags[c]) for c in CARS) if all(flags[c] for c in CARS) else 0
+        if n == 0:
+            return
+        for i in range(n):
+            w0, w1 = flags["car_0"][i], flags["car_1"][i]
+            if w0 and not w1:
+                winner = "car_0"
+            elif w1 and not w0:
+                winner = "car_1"
+            else:
+                winner = "draw"
+            for key in cum:
+                cum[key].append(cum[key][-1] + (1 if winner == key else 0))
+        x_label = "episode"
+        title_extra = " (per-episode winner from metrics)"
+
     x = np.arange(len(cum["car_0"]))
     fig, ax = plt.subplots(figsize=(9, 5))
     for car in CARS:
@@ -187,9 +221,9 @@ def plot_race_wins(run_dir: str, fig_dir: str, label: str = "") -> None:
                 label=f"{car} ({cum[car][-1]} wins)")
     ax.plot(x, cum["draw"], color="gray", linewidth=1.5, linestyle="--",
             label=f"draws ({cum['draw'][-1]})")
-    ax.set_xlabel("race index")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("cumulative wins")
-    ax.set_title(f"Head-to-head race tally{(' — ' + label) if label else ''}")
+    ax.set_title(f"Head-to-head race tally{(' — ' + label) if label else ''}{title_extra}")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()

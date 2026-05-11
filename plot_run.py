@@ -173,6 +173,60 @@ def plot_reward_components(run_dir: str, fig_dir: str, label: str = "") -> None:
     plt.close(fig)
 
 
+def plot_reward_pie(run_dir: str, fig_dir: str, label: str = "",
+                     last_n: int = 50) -> None:
+    """Pie chart of |reward component| over the last `last_n` episodes.
+
+    Mixed-sign rewards don't pie-chart cleanly, so we plot the magnitude of
+    each component (= "share of policy attention") and color by sign:
+    green = positive (helping), red/orange = penalty (hurting).
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    for ax, car in zip(axes, CARS):
+        m = _read_metrics(run_dir, car)
+        ax.set_title(f"{car} — last {last_n} episodes")
+        if not m or not m.get("reward_components"):
+            ax.text(0.5, 0.5, "(no metrics)", ha="center", va="center")
+            ax.axis("off")
+            continue
+        rows = m["reward_components"][-last_n:]
+        avg: Dict[str, float] = {}
+        for r in rows:
+            for k, v in r.items():
+                if k in {"timestep", "ep_count", "ep_length", "episode",
+                         "flipped", "is_winner"}:
+                    continue
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    continue
+                avg[k] = avg.get(k, 0.0) + float(v)
+        if not avg:
+            ax.text(0.5, 0.5, "(no components)", ha="center", va="center")
+            ax.axis("off")
+            continue
+        for k in avg:
+            avg[k] /= len(rows)
+        items = sorted(avg.items(), key=lambda kv: abs(kv[1]), reverse=True)
+        # Drop terms below 1% of total magnitude to keep the chart readable.
+        total_mag = sum(abs(v) for _, v in items) or 1.0
+        items = [(k, v) for k, v in items if abs(v) / total_mag >= 0.01]
+        labels = [f"{k}\n({v:+.2f}/step)" for k, v in items]
+        sizes = [abs(v) for _, v in items]
+        colors = [COMP_COLORS.get(k, "#888888") for k, _ in items]
+        wedges, texts, autotexts = ax.pie(
+            sizes, labels=labels, colors=colors, autopct="%1.0f%%",
+            startangle=90, pctdistance=0.78, labeldistance=1.08,
+            textprops={"fontsize": 9})
+        for t in autotexts:
+            t.set_color("white")
+            t.set_fontweight("bold")
+    fig.suptitle(
+        f"Reward component importance (|magnitude|, last {last_n} eps)"
+        f"{(' — ' + label) if label else ''}", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "reward_pie.png"), dpi=150)
+    plt.close(fig)
+
+
 def plot_race_wins(run_dir: str, fig_dir: str, label: str = "") -> None:
     """Cumulative wins per car over training.
 
@@ -258,6 +312,7 @@ def render_run(run_dir: str, label: str = "") -> str:
     plot_episode_reward(run_dir, fig_dir, label)
     plot_episode_length(run_dir, fig_dir, label)
     plot_reward_components(run_dir, fig_dir, label)
+    plot_reward_pie(run_dir, fig_dir, label)
     plot_race_wins(run_dir, fig_dir, label)
     return fig_dir
 

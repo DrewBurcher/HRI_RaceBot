@@ -50,6 +50,34 @@ def _read_monitor(run_dir: str, car: str) -> Optional[pd.DataFrame]:
     return pd.read_csv(path, skiprows=1)
 
 
+def _episodes_from_metrics(run_dir: str, car: str) -> Optional[pd.DataFrame]:
+    """Reconstruct per-episode (reward, length) from metrics_<car>.json.
+
+    Each row in metrics["reward_components"] is one episode's per-step mean
+    of every reward component (plus ep_length). So the episode reward is
+    sum(components) * ep_length.
+    """
+    m = _read_metrics(run_dir, car)
+    if not m or not m.get("reward_components"):
+        return None
+    rows = m["reward_components"]
+    ignore = {"timestep", "ep_count", "ep_length"}
+    out = []
+    for r in rows:
+        ep_len = float(r.get("ep_length", 0)) or 0.0
+        ep_rew = sum(float(v) for k, v in r.items() if k not in ignore) * ep_len
+        out.append({"r": ep_rew, "l": ep_len, "t": float(r.get("timestep", 0))})
+    return pd.DataFrame(out)
+
+
+def _episodes(run_dir: str, car: str) -> Optional[pd.DataFrame]:
+    """Prefer monitor CSV; fall back to metrics JSON if monitor is missing."""
+    df = _read_monitor(run_dir, car)
+    if df is not None and not df.empty:
+        return df
+    return _episodes_from_metrics(run_dir, car)
+
+
 def _read_metrics(run_dir: str, car: str) -> Optional[dict]:
     path = os.path.join(run_dir, f"metrics_{car}.json")
     if not os.path.exists(path):
@@ -75,7 +103,7 @@ def _smooth(y: np.ndarray, window: int) -> np.ndarray:
 def plot_episode_reward(run_dir: str, fig_dir: str, label: str = "") -> None:
     fig, ax = plt.subplots(figsize=(9, 5))
     for car in CARS:
-        df = _read_monitor(run_dir, car)
+        df = _episodes(run_dir, car)
         if df is None or df.empty:
             continue
         eps = np.arange(len(df))
@@ -96,7 +124,7 @@ def plot_episode_reward(run_dir: str, fig_dir: str, label: str = "") -> None:
 def plot_episode_length(run_dir: str, fig_dir: str, label: str = "") -> None:
     fig, ax = plt.subplots(figsize=(9, 5))
     for car in CARS:
-        df = _read_monitor(run_dir, car)
+        df = _episodes(run_dir, car)
         if df is None or df.empty:
             continue
         eps = np.arange(len(df))
@@ -177,7 +205,7 @@ def plot_compare_episode_reward(runs: List[Tuple[str, str]], out_path: str) -> N
         ax.set_xlabel("episode")
         ax.grid(True, alpha=0.3)
         for run_dir, label in runs:
-            df = _read_monitor(run_dir, car)
+            df = _episodes(run_dir, car)
             if df is None or df.empty:
                 continue
             eps = np.arange(len(df))

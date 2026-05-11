@@ -66,7 +66,7 @@ def _load_resume_state(log_dir: str, base_env: TwoCarRaceEnv, total_timesteps: i
         normalizers[a] = vec_norm
 
         model_path = os.path.join(log_dir, f"{a}_sac_latest.zip")
-        model = SAC.load(model_path, env=vec_norm, device="cpu")
+        model = SAC.load(model_path, env=venv, device="cpu")
         model.tensorboard_log = os.path.join(log_dir, "tb")
         
         buf_path = os.path.join(log_dir, f"{a}_replay_buffer.pkl")
@@ -112,7 +112,7 @@ def train(timesteps: int = 1_000_000, run_name: Optional[str] = None,
             
             cfg = SAC_CONFIG.copy()
             cfg.pop("total_timesteps", None)
-            model = SAC("MlpPolicy", vec_norm, verbose=0, tensorboard_log=os.path.join(log_dir, "tb"), **cfg)
+            model = SAC("MlpPolicy", venv, verbose=0, tensorboard_log=os.path.join(log_dir, "tb"), **cfg)
             
             model._setup_learn(total_timesteps=timesteps, tb_log_name=agent_id)
             

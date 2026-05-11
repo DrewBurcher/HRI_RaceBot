@@ -1,66 +1,78 @@
-"""
-Head-to-head evaluation — run N races between two trained policies.
-
-Usage:
-    python evaluate.py --run runs/duo_sac_123 --episodes 20 [--render]
-
-Looks for `car_0_<algo>_final.zip` and `car_1_<algo>_final.zip` inside the
-run directory.
-"""
-
-from __future__ import annotations
-
-import argparse
 import os
-from typing import Dict
+import time
+import numpy as np
+from stable_baselines3 import SAC
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
-from agents.rl_agent import RLAgent
 from env import TwoCarRaceEnv
 
+def evaluate(run_dir: str, algo: str, episodes: int, render: bool, seed: int):
+    """
+    Loads trained models and normalizers to race them head-to-head.
+    """
+    print(f"Loading run: {run_dir}")
+    
+    if algo.lower() != "sac":
+        print("Warning: Only SAC is officially supported in this configuration.")
 
-def evaluate(run_dir: str, algo: str = "sac", episodes: int = 10,
-             render: bool = False, seed: int = 0) -> Dict[str, int]:
-    env = TwoCarRaceEnv(render_mode="human" if render else None, seed=seed)
-    obs, _ = env.reset()
-
-    agents = {}
+    render_mode = "human" if render else None
+    env = TwoCarRaceEnv(render_mode=render_mode, seed=seed)
+    
+    models = {}
+    normalizers = {}
+    
     for a in env.agent_ids:
-        path = os.path.join(run_dir, f"{a}_{algo}_final")
-        if not (os.path.exists(path) or os.path.exists(path + ".zip")):
-            raise FileNotFoundError(
-                f"Could not find trained model for {a} at {path}.zip")
-        agents[a] = RLAgent(path, algo=algo)
+        model_path = os.path.join(run_dir, f"{a}_sac_final.zip")
+        norm_path = os.path.join(run_dir, f"{a}_vecnormalize.pkl")
+        
+        if not os.path.exists(model_path):
+            print(f"Error: Model not found at {model_path}")
+            env.close()
+            return
+            
+        print(f"Loading model and normalizer for {a}...")
+        models[a] = SAC.load(model_path, device="cpu")
+        
+        # We must attach the normalizer to a dummy env to load it, 
+        # but we will manually call it during the loop.
+        dummy = DummyVecEnv([lambda: TwoCarRaceEnv(render_mode=None)])
+        
+        if os.path.exists(norm_path):
+            normalizers[a] = VecNormalize.load(norm_path, dummy)
+            normalizers[a].training = False      # Freeze running averages
+            normalizers[a].norm_reward = False   # Do not normalize rewards during inference
+        else:
+            print(f"Warning: Normalizer not found at {norm_path}. Using raw inputs.")
+            normalizers[a] = None
 
-    wins = {a: 0 for a in env.agent_ids}
-    wins["draw"] = 0
-
+    print(f"\nStarting evaluation for {episodes} episodes...")
+    
     for ep in range(episodes):
-        obs, _ = env.reset()
+        obs, info = env.reset(seed=seed + ep)
         done = False
+        
         while not done:
-            actions = {a: agents[a].act(obs[a]) for a in env.agent_ids}
-            obs, rew, term, trunc, info = env.step(actions)
-            if any(term.values()) or any(trunc.values()):
-                w = info.get("__winner__", None)
-                if w is None:
-                    wins["draw"] += 1
+            actions = {}
+            for a in env.agent_ids:
+                # 1. Normalize the observation using the saved statistics
+                if normalizers[a]:
+                    norm_obs = normalizers[a].normalize_obs(obs[a].reshape(1, -1))
                 else:
-                    wins[w] += 1
+                    norm_obs = obs[a].reshape(1, -1)
+                    
+                # 2. Predict using deterministic=True to suppress exploration noise
+                action, _ = models[a].predict(norm_obs, deterministic=True)
+                actions[a] = action[0] 
+                
+            obs, rewards, terminated, truncated, info = env.step(actions)
+            
+            if render:
+                # Sleep to maintain a viewable framerate (~60 FPS)
+                time.sleep(1.0 / 60.0)
+                
+            if any(terminated.values()) or any(truncated.values()):
                 done = True
-        print(f"[eval] race {ep + 1}/{episodes}: "
-              f"winner = {info.get('__winner__', 'draw')}")
+                winner = info.get('__winner__')
+                print(f"Episode {ep+1}/{episodes} finished. Winner: {winner}")
 
     env.close()
-    print("\n[eval] final tally:", wins)
-    return wins
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run", required=True, help="Run dir (e.g. runs/duo_sac_123)")
-    parser.add_argument("--algo", choices=["ppo", "sac"], default="sac")
-    parser.add_argument("--episodes", type=int, default=10)
-    parser.add_argument("--render", action="store_true")
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args()
-    evaluate(args.run, args.algo, args.episodes, args.render, args.seed)
